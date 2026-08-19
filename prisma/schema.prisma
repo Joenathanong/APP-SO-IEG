@@ -1,0 +1,291 @@
+// stock-opname-v2 — TiDB Cloud Starter (MySQL)
+//
+// Dirancang MySQL-native SEJAK AWAL, bukan hasil port dari PostgreSQL.
+// Konsekuensinya yang sengaja diikuti:
+//   - tidak ada scalar list (String[]) — tidak didukung Prisma di MySQL/TiDB
+//   - setiap kolom teks diberi @db.VarChar(n) EKSPLISIT; default Prisma MySQL
+//     hanya 191 karakter, sementara nama produk terpanjang di data Anda 283
+//   - relationMode = "prisma": TiDB tidak menegakkan foreign key, jadi setiap
+//     relasi WAJIB punya index sendiri (semuanya sudah ada di bawah)
+//   - tidak memakai generated column MySQL; kolom norm* diisi kode aplikasi
+//
+// Ukuran VarChar diambil dari panjang maksimum terukur di SO NEW.xlsx,
+// dengan kelonggaran. Angka di komentar = panjang maksimum yang terukur.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider     = "mysql"
+  url          = env("DATABASE_URL")
+  relationMode = "prisma"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MASTER
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Master material gabungan dari TIGA sumber (kunci: kode OCS):
+///   Data OCS            → name, active, (qty buku)
+///   Resume_SO           → sapCodeIeg / sapCodeEji, category
+///   Master_Gudang_Kecil → barcodeProduct, barcodeBpom
+model Material {
+  id       Int    @id @default(autoincrement())
+  ocsCode  String @unique @db.VarChar(96) // maks terukur 49
+  name     String @db.VarChar(512) // maks terukur 283 — MELEBIHI default 191
+  category String? @db.VarChar(64) // dari Resume_SO "Kategori Produk"
+
+  /// Dua sistem penomoran SAP yang KEDUANYA masih aktif.
+  /// Pemilahan dari data lama memakai prefix: 1222/1227/1228 = EJI, selain itu
+  /// IEG. Aturan itu diuji ke 424 baris Resume_SO — nol pelanggaran.
+  sapCodeIeg String? @db.VarChar(32)
+  sapCodeEji String? @db.VarChar(32)
+
+  barcodeProduct String? @db.VarChar(64)
+  /// PERHATIAN: barcode BPOM TIDAK unik per material — satu registrasi bisa
+  /// mencakup beberapa varian ukuran. Lihat catatan di lookup material.
+  barcodeBpom String? @db.VarChar(64)
+
+  /// Kolom ternormalisasi untuk pencarian: huruf kecil, tanpa spasi, tanpa nol
+  /// di depan, tanpa sufiks ".0" bawaan Excel. Diisi oleh normalizeCode() di
+  /// src/lib/normalize.ts setiap kali menulis — JANGAN diisi manual.
+  normOcsCode        String  @db.VarChar(96)
+  normSapIeg         String? @db.VarChar(32)
+  normSapEji         String? @db.VarChar(32)
+  normBarcodeProduct String? @db.VarChar(64)
+  normBarcodeBpom    String? @db.VarChar(64)
+
+  active Boolean @default(true)
+
+  /// Jejak asal data supaya bisa ditelusuri: "DataOCS+ResumeSO+MasterGK"
+  source     String? @db.VarChar(64)
+  /// Catatan konflik dari proses penggabungan, mis. barcode dipakai bersama.
+  reviewNote String? @db.VarChar(512)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bookStocks BookStock[]
+  soEntries  SoEntry[]
+
+  @@index([normOcsCode])
+  @@index([normSapIeg])
+  @@index([normSapEji])
+  @@index([normBarcodeProduct])
+  @@index([normBarcodeBpom])
+  @@index([active])
+  @@map("materials")
+}
+
+/// Master bin dibangun dari lokasi yang BENAR-BENAR dipakai di data historis.
+/// Validasi sengaja LONGGAR: scan ke bin tak dikenal tetap diterima, hanya
+/// ditandai untuk ditinjau — supaya operator tidak pernah terhenti di lapangan.
+model Bin {
+  id Int @id @default(autoincrement())
+
+  /// Ejaan yang DITAMPILKAN ke operator — bentuk asli yang paling sering
+  /// dipakai di lapangan, mis. "FLOOR BAK". Sengaja TIDAK unik.
+  code String @db.VarChar(160) // maks 122, itu pun akibat barcode nyasar
+  /// Bentuk seragam untuk MENCOCOKKAN, mis. "FLOOR-BAK". Inilah kunci
+  /// sebenarnya: "RACKING BAK" dan "RACKING-BAK" harus jatuh ke bin yang sama.
+  normCode String @unique @db.VarChar(160)
+  binType     String? @db.VarChar(16) // RAK | FLOOR | RACKING | LAINNYA
+  warehouse   String? @db.VarChar(32)
+  /// Keterangan bebas dari admin. Ada karena halaman Master Data Bin memang
+  /// mengirimkannya — kolom yang tidak ada membuat isian operator hilang
+  /// diam-diam, dan itu jenis kegagalan yang paling merusak kepercayaan.
+  description String? @db.VarChar(255)
+
+  active      Boolean @default(true)
+  /// true = kode mencurigakan (sangat pendek / hanya muncul sekali di histori)
+  needsReview Boolean @default(false)
+  /// Berapa kali bin ini muncul di data historis — informatif, bukan saldo.
+  scanCount   Int     @default(0)
+  /// Variasi penulisan asli yang menghasilkan kode ini, dipisah "; "
+  variants    String? @db.VarChar(255)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  binCounts BinCount[]
+
+  @@index([code])
+  @@index([active])
+  @@map("bins")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESI OPNAME
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum SessionStatus {
+  DRAFT
+  OPEN
+  CLOSED
+}
+
+/// Pembungkus satu periode opname. Menggantikan kebiasaan mengosongkan sheet
+/// tiap periode — riwayat periode lama tetap utuh dan bisa dibuka kembali.
+model OpnameSession {
+  id     Int           @id @default(autoincrement())
+  code   String        @unique @db.VarChar(32) // mis. SO-2026-08-001
+  name   String        @db.VarChar(160)
+  status SessionStatus @default(DRAFT)
+
+  /// Penjaga "hanya boleh SATU sesi OPEN" yang DITEGAKKAN DATABASE.
+  /// Diisi 1 saat status OPEN, dan NULL selain itu. MySQL/TiDB mengizinkan
+  /// banyak NULL pada unique index, tapi hanya satu nilai 1 — jadi sesi OPEN
+  /// kedua ditolak walau ada dua request bersamaan. Pengecekan di aplikasi
+  /// saja tidak cukup: dua admin yang menekan tombol berbarengan bisa lolos.
+  openGuard Int? @unique
+
+  startedAt DateTime?
+  endedAt   DateTime?
+  createdBy String    @db.VarChar(64)
+  notes     String?   @db.VarChar(512)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  entries    SoEntry[]
+  bookStocks BookStock[]
+  binCounts  BinCount[]
+
+  @@index([status])
+  @@map("opname_sessions")
+}
+
+/// Saldo buku per material per sesi — hasil import .xlsx dari export SAP/OCS.
+/// Terverifikasi di audit: kolom "Jumlah OCS" = "Qty On Hand" di Data OCS
+/// (361 cocok, 0 berbeda).
+model BookStock {
+  id         Int @id @default(autoincrement())
+  sessionId  Int
+  materialId Int
+
+  qtyBook Decimal @db.Decimal(18, 3)
+
+  /// Teks kode asli dari file import, disimpan apa adanya untuk penelusuran
+  /// bila materialnya nanti ternyata salah dipetakan.
+  rawCode String? @db.VarChar(96)
+
+  createdAt DateTime @default(now())
+
+  session  OpnameSession @relation(fields: [sessionId], references: [id])
+  material Material      @relation(fields: [materialId], references: [id])
+
+  @@unique([sessionId, materialId])
+  @@index([sessionId])
+  @@index([materialId])
+  @@map("book_stocks")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRANSAKSI
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum WarehouseType {
+  BESAR
+  KECIL
+  TRANSIT
+}
+
+/// Menggantikan DUA sheet sekaligus (SO_Gudang_Besar + SO_Gudang_Kecil_Transit).
+/// Menyatukannya menghapus seluruh percabangan `isGB ? ... : ...` yang selama
+/// ini jadi sumber bug indeks kolom di app lama.
+model SoEntry {
+  id Int @id @default(autoincrement())
+
+  /// Kunci idempotency dari klien. Penerus kolom "Client ID" di sheet, tapi di
+  /// sini ditegakkan database — kiriman ulang dari antrean offline mustahil
+  /// menghasilkan baris kembar, berapa kali pun dicoba.
+  clientEntryId String @unique @db.VarChar(64)
+
+  sessionId     Int
+  warehouseType WarehouseType
+
+  /// NULLABLE dengan sengaja. Audit menunjukkan 3,3% scan Gudang Besar dan 7,5%
+  /// Gudang Kecil tidak menemukan pasangan di master. Scan tetap HARUS tersimpan
+  /// — data tidak boleh hilang hanya karena master belum lengkap.
+  materialId Int?
+  /// Kode/teks material apa adanya saat scan, untuk rekonsiliasi manual.
+  rawMaterialText String? @db.VarChar(255)
+  /// Barcode mentah apa adanya, untuk merekonstruksi baris yang gagal parse.
+  rawBarcode String @db.VarChar(255) // maks terukur 122
+
+  batchDoc  String?  @db.VarChar(32)
+  qtyCarton Decimal? @db.Decimal(18, 3)
+  qtyPerBox Decimal? @db.Decimal(18, 3)
+  qtyPcs    Decimal  @db.Decimal(18, 3)
+
+  binCode     String  @db.VarChar(160)
+  normBinCode String  @db.VarChar(160)
+  /// false = bin belum ada di master. Scan tetap diterima (validasi longgar),
+  /// tapi muncul di layar tinjau.
+  binKnown    Boolean @default(true)
+
+  userName String  @db.VarChar(64)
+  shift    String  @db.VarChar(16)
+  notes    String? @db.VarChar(255)
+
+  /// Dicap di KLIEN saat scan dibuat, bukan saat tersimpan di server.
+  /// Entry yang mengantre semalam harus tetap membawa waktu scan aslinya.
+  scannedAt DateTime
+  createdAt DateTime @default(now())
+
+  session  OpnameSession @relation(fields: [sessionId], references: [id])
+  material Material?     @relation(fields: [materialId], references: [id])
+
+  @@index([sessionId])
+  @@index([materialId])
+  @@index([sessionId, warehouseType])
+  @@index([sessionId, normBinCode])
+  @@index([sessionId, materialId])
+  @@index([scannedAt])
+  @@map("so_entries")
+}
+
+enum BinCountStatus {
+  BELUM
+  PROSES
+  SELESAI
+}
+
+/// PENGGANTI fitur "potensi double" yang lama.
+///
+/// Fitur lama mencocokkan barcode+lokasi dan menandai 75% baris Gudang Besar
+/// serta 90% Gudang Kecil sebagai "potensi double" — padahal itu perilaku
+/// normal: satu SKU di satu bin memang discan sekali per karton. Peringatan
+/// yang muncul di seperempat scan hanya melatih operator untuk mengabaikannya.
+///
+/// Yang benar-benar perlu dicegah adalah DUA ORANG menghitung bin yang sama.
+/// Itu tidak bisa dideteksi dari barcode+lokasi, tapi bisa dari status per bin.
+model BinCount {
+  id        Int            @id @default(autoincrement())
+  sessionId Int
+  binId     Int
+  status    BinCountStatus @default(BELUM)
+
+  countedBy String?   @db.VarChar(64)
+  countedAt DateTime?
+
+  /// Ringkasan hasil hitung di bin ini — ditampilkan sebagai INFORMASI
+  /// ("sudah 51 karton SKU ini di bin ini"), bukan sebagai alarm.
+  entryCount Int     @default(0)
+  totalQty   Decimal @default(0) @db.Decimal(18, 3)
+
+  notes String? @db.VarChar(255)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  session OpnameSession @relation(fields: [sessionId], references: [id])
+  bin     Bin           @relation(fields: [binId], references: [id])
+
+  @@unique([sessionId, binId])
+  @@index([sessionId])
+  @@index([binId])
+  @@index([sessionId, status])
+  @@map("bin_counts")
+}

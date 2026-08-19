@@ -1,0 +1,51 @@
+{
+  "name": "stock-opname-v2",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "prisma generate && next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio",
+    "db:generate": "prisma generate",
+    "check:db": "node scripts/check-db-url.mjs",
+    "seed:master": "tsx prisma/seed-master.ts",
+    "seed:master:dry": "tsx prisma/seed-master.ts --dry-run"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed-master.ts"
+  },
+  "dependencies": {
+    "next": "14.2.5",
+    "react": "^18",
+    "react-dom": "^18",
+    "@prisma/client": "^5.22.0",
+    "firebase": "^10.12.2",
+    "firebase-admin": "^12.2.0",
+    "dexie": "^3.2.7",
+    "next-themes": "^0.3.0",
+    "recharts": "^2.12.7",
+    "lucide-react": "^0.400.0",
+    "date-fns": "^3.6.0",
+    "react-hot-toast": "^2.4.1",
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^2.4.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "prisma": "^5.22.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5",
+    "tailwindcss": "^3.4.1",
+    "postcss": "^8",
+    "autoprefixer": "^10.0.1",
+    "eslint": "^8",
+    "eslint-config-next": "14.2.5"
+  }
+}
