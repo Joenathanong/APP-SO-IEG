@@ -11,7 +11,12 @@ import { auth, db } from '@/lib/firebase';
 import { AppUser } from '@/types';
 
 const SESSION_KEY = 'so_session';
-const SESSION_DURATION = 60 * 60 * 1000; // 1 hour
+
+// Batas sesi 1 jam DIHAPUS atas permintaan. Sesi kini bertahan sampai operator
+// menekan Logout, atau sampai Firebase sendiri mencabut kredensialnya.
+//
+// Catatan: `so_session` tetap disimpan (hanya berisi waktu login) supaya
+// pembersihan saat logout tetap konsisten dan waktu mulai sesi bisa ditampilkan.
 
 interface AuthContextType {
   user: AppUser | null;
@@ -46,17 +51,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser) {
-        // Check session expiry
-        const sessionStr = localStorage.getItem(SESSION_KEY);
-        if (sessionStr) {
-          const session = JSON.parse(sessionStr);
-          if (Date.now() > session.expiresAt) {
-            await logout();
-            setLoading(false);
-            return;
-          }
-        }
-
         try {
           const profile = await loadUserProfile(fbUser);
           if (!profile) {
@@ -85,20 +79,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => unsubscribe();
   }, [logout]);
 
-  // Periodic session check
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const sessionStr = localStorage.getItem(SESSION_KEY);
-      if (sessionStr) {
-        const session = JSON.parse(sessionStr);
-        if (Date.now() > session.expiresAt) {
-          logout();
-        }
-      }
-    }, 30000); // check every 30 seconds
-    return () => clearInterval(interval);
-  }, [logout]);
-
   const login = async (email: string, password: string) => {
     const cred = await signInWithEmailAndPassword(auth, email, password);
     const profile = await loadUserProfile(cred.user);
@@ -112,11 +92,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw new Error('Akun dinonaktifkan. Hubungi administrator.');
     }
 
-    const session = {
-      loginTime: Date.now(),
-      expiresAt: Date.now() + SESSION_DURATION,
-    };
-    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    localStorage.setItem(SESSION_KEY, JSON.stringify({ loginTime: Date.now() }));
 
     setFirebaseUser(cred.user);
     setUser(profile);

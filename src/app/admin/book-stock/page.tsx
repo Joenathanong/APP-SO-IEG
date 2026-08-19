@@ -160,6 +160,14 @@ export default function BookStockPage() {
           </div>
         )}
 
+        {/* Dua syarat berbeda, jadi sebutkan yang mana yang belum terpenuhi —
+            sebelumnya keduanya sama-sama membuat upload hilang tanpa keterangan. */}
+        {user && isAdmin && !sesi && (
+          <div className="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2">
+            <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
+            <span>Upload baru muncul setelah ada sesi opname yang dibuka. Buka sesi di menu <strong>Sesi Opname</strong>.</span>
+          </div>
+        )}
         {isAdmin && sesi && (
           <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 space-y-4">
             <label className="flex items-center justify-center gap-3 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-xl py-8 cursor-pointer hover:border-blue-400 dark:hover:border-blue-500 transition-colors">
@@ -228,9 +236,15 @@ export default function BookStockPage() {
           </div>
         )}
 
-        {!isAdmin && (
-          <div className="flex items-center gap-2 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2">
-            <AlertTriangle size={13} /> Import saldo buku hanya tersedia untuk Administrator.
+        {!user && (
+          <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
+            <Loader2 size={13} className="animate-spin" /> Memuat profil pengguna...
+          </div>
+        )}
+        {user && !isAdmin && (
+          <div className="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2">
+            <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
+            <span>Import saldo buku hanya untuk Administrator. Peran akun Anda: <strong>{user.role}</strong>.</span>
           </div>
         )}
 

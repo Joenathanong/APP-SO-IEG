@@ -4,7 +4,6 @@ import { Menu, LogOut, Sun, Moon, WifiOff, Wifi, RefreshCw } from 'lucide-react'
 import { useTheme } from 'next-themes';
 import { useAuth } from '@/contexts/AuthContext';
 import { useOfflineQueue } from '@/hooks/useOfflineQueue';
-import { formatCountdown } from '@/lib/utils';
 import { useShift } from '@/contexts/ShiftContext';
 
 interface TopBarProps {
@@ -16,34 +15,38 @@ export function TopBar({ onMenuClick }: TopBarProps) {
   const { user, logout } = useAuth();
   const { shift } = useShift();
   const { isOnline, queueCount, isSyncing, lastError, stuckCount, syncQueue } = useOfflineQueue();
-  const [timeRemaining, setTimeRemaining] = useState<number>(0);
+  const [lamaSesi, setLamaSesi] = useState<number>(0);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
+  // Menghitung MAJU sejak login, dan TIDAK pernah memaksa logout.
+  // Sebelumnya ini hitungan mundur 1 jam yang otomatis mengeluarkan operator —
+  // di tengah opname itu berarti scan terhenti dan antrean menumpuk tanpa sebab
+  // yang jelas bagi yang memakainya.
   useEffect(() => {
-    const updateTimer = () => {
+    const perbarui = () => {
       const session = localStorage.getItem('so_session');
-      if (session) {
-        const { expiresAt } = JSON.parse(session);
-        const remaining = expiresAt - Date.now();
-        setTimeRemaining(Math.max(0, remaining));
-        if (remaining <= 0) logout();
+      if (!session) { setLamaSesi(0); return; }
+      try {
+        const { loginTime } = JSON.parse(session);
+        setLamaSesi(loginTime ? Date.now() - loginTime : 0);
+      } catch {
+        setLamaSesi(0);
       }
     };
-    updateTimer();
-    const interval = setInterval(updateTimer, 1000);
+    perbarui();
+    const interval = setInterval(perbarui, 30_000);
     return () => clearInterval(interval);
-  }, [logout]);
+  }, []);
 
-  const timerColor =
-    timeRemaining > 20 * 60 * 1000
-      ? 'text-green-600 dark:text-green-400'
-      : timeRemaining > 10 * 60 * 1000
-      ? 'text-yellow-600 dark:text-yellow-400'
-      : 'text-red-600 dark:text-red-400 animate-pulse';
+  const formatLama = (ms: number) => {
+    const menit = Math.floor(ms / 60_000);
+    const jam = Math.floor(menit / 60);
+    return jam > 0 ? `${jam}j ${menit % 60}m` : `${menit}m`;
+  };
 
   return (
     <header className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-4 py-3 flex items-center justify-between gap-4 shadow-sm flex-shrink-0">
@@ -109,11 +112,14 @@ export function TopBar({ onMenuClick }: TopBarProps) {
           </button>
         )}
 
-        {/* Session timer */}
-        {mounted && timeRemaining > 0 && (
-          <div className={`flex items-center gap-1 text-xs font-mono font-semibold ${timerColor}`}>
+        {/* Lama sesi berjalan — informasi saja, tidak ada logout otomatis */}
+        {mounted && lamaSesi > 60_000 && (
+          <div
+            className="flex items-center gap-1 text-xs font-mono text-gray-500 dark:text-gray-400"
+            title="Lama sesi berjalan. Sesi tidak berakhir sendiri — tekan Logout untuk keluar."
+          >
             <span className="hidden sm:inline">Sesi:</span>
-            <span>{formatCountdown(timeRemaining)}</span>
+            <span>{formatLama(lamaSesi)}</span>
           </div>
         )}
 

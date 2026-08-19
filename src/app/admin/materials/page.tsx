@@ -211,6 +211,23 @@ export default function MaterialsPage() {
           </div>
         </div>
 
+        {/* Kalau upload tidak tersedia, KATAKAN SEBABNYA.
+            Menyembunyikan elemen tanpa penjelasan membuat orang menyimpulkan
+            fiturnya rusak — itu terjadi persis di sesi ini. */}
+        {!user && (
+          <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
+            <Loader2 size={13} className="animate-spin" /> Memuat profil pengguna...
+          </div>
+        )}
+        {user && !isAdmin && (
+          <div className="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2">
+            <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
+            <span>
+              Upload, tambah, dan edit material hanya untuk Administrator.
+              Peran akun Anda saat ini: <strong>{user.role}</strong>. Export tetap bisa dipakai.
+            </span>
+          </div>
+        )}
         {isAdmin && (
           <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 space-y-3">
             <label className="flex items-center justify-center gap-3 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-xl py-6 cursor-pointer hover:border-blue-400 transition-colors">

@@ -12,6 +12,7 @@
     "db:studio": "prisma studio",
     "db:generate": "prisma generate",
     "check:db": "node scripts/check-db-url.mjs",
+    "check:firebase": "node scripts/check-firebase-key.mjs",
     "seed:master": "tsx prisma/seed-master.ts",
     "seed:master:dry": "tsx prisma/seed-master.ts --dry-run"
   },

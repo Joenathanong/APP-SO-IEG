@@ -9,7 +9,7 @@ import { Select } from '@/components/ui/Select';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/hooks/useToast';
 import { MasterBin } from '@/types';
-import { Database, Plus, Edit2, RefreshCw, Search } from 'lucide-react';
+import { Database, Plus, Edit2, RefreshCw, Search, Upload, FileDown, FileSpreadsheet, Loader2 } from 'lucide-react';
 
 export default function MasterBinPage() {
   const { user } = useAuth();
@@ -31,6 +31,13 @@ export default function MasterBinPage() {
   const [formActive, setFormActive] = useState(true);
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
 
+  // Upload & export massal. Sebelumnya bin hanya bisa ditambah satu per satu,
+  // padahal master bin punya ratusan baris.
+  const [imporBin, setImporBin] = useState<any[] | null>(null);
+  const [namaFile, setNamaFile] = useState('');
+  const [mengimpor, setMengimpor] = useState(false);
+  const [hasilImpor, setHasilImpor] = useState<{ dibuat: number; dilewati: number; gagal: string[] } | null>(null);
+
   const warehouses = Array.from(new Set(bins.map((b) => b.warehouse).filter(Boolean)));
 
   const fetchBins = async () => {
@@ -51,7 +58,9 @@ export default function MasterBinPage() {
   useEffect(() => {
     if (user?.role !== 'administrator') return;
     fetchBins();
-  }, []);
+    // Bergantung pada `user`: saat halaman pertama dibuka, profil bisa belum
+    // termuat, dan tanpa dependensi ini daftar bin tidak pernah diambil.
+  }, [user]);
 
   const filtered = bins.filter((b) => {
     const matchWarehouse = !warehouseFilter || b.warehouse === warehouseFilter;
@@ -144,11 +153,23 @@ export default function MasterBinPage() {
     }
   };
 
-  if (user?.role !== 'administrator') {
+  // Selama profil belum termuat, `user` masih null — menampilkan "Akses ditolak"
+  // di saat itu membuat administrator sekalipun mengira tidak punya hak.
+  if (!user) {
     return (
       <AppLayout>
-        <div className="flex items-center justify-center h-64 text-gray-500">
-          Akses ditolak. Halaman ini hanya untuk Administrator.
+        <div className="flex items-center justify-center h-64 gap-3 text-gray-500">
+          <Loader2 size={18} className="animate-spin" /> Memuat profil pengguna...
+        </div>
+      </AppLayout>
+    );
+  }
+  if (user.role !== 'administrator') {
+    return (
+      <AppLayout>
+        <div className="flex flex-col items-center justify-center h-64 text-gray-500 gap-1 text-center px-6">
+          <span className="font-medium">Halaman ini hanya untuk Administrator.</span>
+          <span className="text-xs">Peran akun Anda saat ini: <strong>{user.role}</strong>.</span>
         </div>
       </AppLayout>
     );
@@ -200,6 +221,103 @@ export default function MasterBinPage() {
     </div>
   );
 
+
+  /** File diurai di browser lalu ditampilkan dulu — tidak ada baris yang masuk
+   *  database sebelum tombol Import ditekan. */
+  const pilihFile = async (file: File) => {
+    setHasilImpor(null);
+    setNamaFile(file.name);
+    try {
+      const XLSX = await import('xlsx');
+      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const grid = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false }) as any[][];
+
+      // Header dicari, bukan diasumsikan ada di baris pertama.
+      const idx = grid.findIndex((r) => r.some((c) => /kode\s*bin|^bin$|^kode$/i.test(String(c).trim())));
+      if (idx < 0) {
+        showError('Format tidak dikenali', 'Tidak menemukan kolom "Kode Bin".');
+        return;
+      }
+      const H = grid[idx].map((c) => String(c).trim().toLowerCase());
+      const cari = (...pola: RegExp[]) => H.findIndex((h) => pola.some((pp) => pp.test(h)));
+      const kBin = cari(/kode\s*bin/, /^bin$/, /^kode$/);
+      const kDesc = cari(/deskripsi/, /keterangan/, /^description$/);
+      const kWh = cari(/gudang/, /^warehouse$/);
+      const kAktif = cari(/^aktif$/, /^active$/, /^status$/);
+
+      const rows = grid.slice(idx + 1)
+        .map((r) => ({
+          binCode: String(r[kBin] ?? '').trim(),
+          description: kDesc >= 0 ? String(r[kDesc] ?? '').trim() : '',
+          warehouse: kWh >= 0 ? String(r[kWh] ?? '').trim() : '',
+          active: kAktif >= 0 ? !/^(tidak|no|false|0|nonaktif)$/i.test(String(r[kAktif] ?? '').trim()) : true,
+        }))
+        .filter((r) => r.binCode);
+
+      if (rows.length === 0) { showError('Tidak ada baris data'); return; }
+      setImporBin(rows);
+      showSuccess('File terbaca', `${rows.length} baris siap di-import`);
+    } catch (e: any) {
+      showError('Gagal membaca file', e.message);
+    }
+  };
+
+  const jalankanImpor = async () => {
+    if (!imporBin) return;
+    setMengimpor(true);
+    let dibuat = 0, dilewati = 0;
+    const gagal: string[] = [];
+    try {
+      // Dikirim per baris supaya bin yang penulisannya bentrok bisa dilaporkan
+      // satu per satu, bukan menggagalkan seluruh berkas.
+      for (const r of imporBin) {
+        const res = await fetch('/api/bins', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(r),
+        });
+        if (res.ok) dibuat++;
+        else if (res.status === 409) dilewati++;
+        else {
+          const j = await res.json().catch(() => ({}));
+          if (gagal.length < 20) gagal.push(`${r.binCode}: ${j.error ?? res.status}`);
+        }
+      }
+      setHasilImpor({ dibuat, dilewati, gagal });
+      showSuccess('Import selesai', `${dibuat} bin baru, ${dilewati} sudah ada`);
+      setImporBin(null);
+      setNamaFile('');
+      fetchBins();
+    } catch (e: any) {
+      showError('Import gagal', e.message);
+    } finally {
+      setMengimpor(false);
+    }
+  };
+
+  const ekspor = async () => {
+    try {
+      if (bins.length === 0) { showError('Tidak ada data untuk diekspor'); return; }
+      const XLSX = await import('xlsx');
+      // Judul kolom sama dengan yang diterima Import → bisa disunting lalu dimuat ulang.
+      const header = ['Kode Bin', 'Deskripsi', 'Gudang', 'Aktif'];
+      const data = [header, ...bins.map((b: any) => [
+        b.binCode ?? '', b.description ?? '', b.warehouse ?? '', b.active ? 'Ya' : 'Tidak',
+      ])];
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet(data);
+      ws['!cols'] = header.map((h, i) => ({
+        wch: Math.max(h.length, ...data.slice(1).map((r) => String(r[i] ?? '').length)) + 2,
+      }));
+      XLSX.utils.book_append_sheet(wb, ws, 'Master Bin');
+      XLSX.writeFile(wb, `Master_Bin_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      showSuccess('Export selesai', `${bins.length} bin`);
+    } catch (e: any) {
+      showError('Gagal export', e.message);
+    }
+  };
+
   return (
     <AppLayout>
       <div className="space-y-5">
@@ -212,7 +330,70 @@ export default function MasterBinPage() {
             </h1>
             <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">{bins.length} bin terdaftar</p>
           </div>
+
+        {/* Upload massal — halaman ini sudah dijaga admin di atas, jadi tidak
+            perlu gerbang tambahan di sini. */}
+        <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 space-y-3">
+          <label className="flex items-center justify-center gap-3 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-xl py-6 cursor-pointer hover:border-blue-400 transition-colors">
+            <FileSpreadsheet size={20} className="text-gray-400" />
+            <span className="text-sm text-gray-600 dark:text-gray-400">
+              {namaFile || 'Upload .xlsx untuk menambah bin secara massal'}
+            </span>
+            <input type="file" accept=".xlsx,.xls,.csv" className="hidden"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) pilihFile(f); }} />
+          </label>
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            Kolom yang dikenali: Kode Bin · Deskripsi · Gudang · Aktif. Bin yang penulisannya
+            setara dengan bin yang sudah ada akan dilewati, bukan diduplikasi — jadi
+            &quot;RACKING BAK&quot; dan &quot;RACKING-BAK&quot; tidak bisa masuk dua kali.
+            Hasil <strong>Export</strong> memakai judul kolom yang sama, sehingga bisa disunting
+            di Excel lalu dimuat ulang.
+          </p>
+
+          {imporBin && (
+            <div className="space-y-3 border-t border-gray-200 dark:border-gray-700 pt-3">
+              <div className="text-sm text-gray-700 dark:text-gray-300">
+                <strong>{imporBin.length.toLocaleString('id-ID')}</strong> baris terbaca. Contoh 3 pertama:
+              </div>
+              <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50 dark:bg-gray-700/50">
+                    <tr>{['Kode Bin', 'Deskripsi', 'Gudang'].map((h) => (
+                      <th key={h} className="px-2 py-1.5 text-left">{h}</th>))}</tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                    {imporBin.slice(0, 3).map((r, i) => (
+                      <tr key={i}>
+                        <td className="px-2 py-1 font-mono">{r.binCode}</td>
+                        <td className="px-2 py-1">{r.description}</td>
+                        <td className="px-2 py-1">{r.warehouse}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex gap-3">
+                <Button variant="outline" onClick={() => { setImporBin(null); setNamaFile(''); }} className="flex-1">Batal</Button>
+                <Button onClick={jalankanImpor} loading={mengimpor} className="flex-1">
+                  <Upload size={14} /> Import {imporBin.length.toLocaleString('id-ID')} bin
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {hasilImpor && (
+            <div className="text-xs text-gray-600 dark:text-gray-400 border-t border-gray-200 dark:border-gray-700 pt-3 space-y-1">
+              <div>Bin baru <strong>{hasilImpor.dibuat}</strong> · sudah ada (dilewati) {hasilImpor.dilewati}</div>
+              {hasilImpor.gagal.length > 0 && (
+                <div className="text-amber-700 dark:text-amber-400">Gagal: {hasilImpor.gagal.join(' · ')}</div>
+              )}
+            </div>
+          )}
+        </div>
           <div className="flex gap-2">
+            <Button onClick={ekspor} variant="outline" size="sm">
+              <FileDown size={14} /> Export
+            </Button>
             <Button onClick={fetchBins} variant="outline" size="sm" loading={loading}>
               <RefreshCw size={14} />
             </Button>
