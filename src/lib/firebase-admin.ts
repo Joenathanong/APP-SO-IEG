@@ -57,6 +57,43 @@ function getApp(): admin.app.App {
     );
   }
 
+  // Periksa SETIAP nilai sebelum dipakai, bukan hanya private key.
+  //
+  // Project ID dan client email ikut masuk ke URL / payload permintaan ke
+  // Google. Kalau salah satunya keliru terisi private key — dan itu benar-benar
+  // terjadi — kuncinya akan terkirim sebagai bagian URL lalu muncul di halaman
+  // error dan di log. Kebocoran seperti itu tidak bisa ditarik kembali, jadi
+  // gerbangnya ada di sini.
+  const bocor = (v: string) => /PRIVATE KEY|BEGIN [A-Z]/.test(v);
+
+  if (bocor(projectId!)) {
+    throw new Error(
+      'FIREBASE_ADMIN_PROJECT_ID berisi private key, bukan ID project. ' +
+      'Nilainya tampaknya tertukar. Isi variabel ini dengan field "project_id" ' +
+      'dari file service account JSON (contoh: nama-project-12345). ' +
+      'PENTING: private key yang salah tempat itu berisiko ikut tercatat di log — ganti kuncinya di Google Cloud Console.'
+    );
+  }
+  if (bocor(clientEmail!)) {
+    throw new Error(
+      'FIREBASE_ADMIN_CLIENT_EMAIL berisi private key, bukan alamat email. ' +
+      'Isi dengan field "client_email" dari file service account JSON. ' +
+      'PENTING: ganti private key Anda di Google Cloud Console — nilai yang salah tempat berisiko sudah tercatat.'
+    );
+  }
+  if (!/^[a-z0-9][a-z0-9-]{3,29}$/.test(projectId!)) {
+    throw new Error(
+      `FIREBASE_ADMIN_PROJECT_ID tidak berbentuk ID project yang sah: "${projectId!.slice(0, 40)}". ` +
+      'Bentuknya huruf kecil, angka, dan tanda hubung — contoh: nama-project-12345.'
+    );
+  }
+  if (!clientEmail!.includes('@') || !clientEmail!.endsWith('.iam.gserviceaccount.com')) {
+    throw new Error(
+      `FIREBASE_ADMIN_CLIENT_EMAIL tidak berbentuk email service account: "${clientEmail!.slice(0, 40)}". ` +
+      'Bentuknya berakhiran @<project>.iam.gserviceaccount.com.'
+    );
+  }
+
   const privateKey = rapikanPem(privateKeyRaw!);
   if (!privateKey.includes('BEGIN PRIVATE KEY')) {
     throw new Error(

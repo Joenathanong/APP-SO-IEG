@@ -73,12 +73,34 @@ for (const v of VARS) {
   const { nilai, diKutip, multiBaris } = perBerkas[sumber[0]][v];
 
   if (v !== 'FIREBASE_ADMIN_PRIVATE_KEY') {
+    // Nilai yang tertukar adalah kesalahan paling berbahaya: project ID dan
+    // client email masuk ke URL permintaan, sehingga private key yang salah
+    // tempat akan bocor ke log dan halaman error.
+    const tampakKunci = /PRIVATE KEY|BEGIN [A-Z]/.test(nilai);
     console.log(`   sumber   : ${sumber[0]}`);
     console.log(`   panjang  : ${nilai.length} karakter`);
-    console.log(`   nilai    : ${nilai || '(kosong)'}`);
-    if (!nilai) { console.log('   ✗ KOSONG'); adaMasalah = true; }
-    else if (v.endsWith('CLIENT_EMAIL') && !nilai.includes('@')) {
-      console.log('   ✗ tidak seperti email service account'); adaMasalah = true;
+    console.log(`   nilai    : ${tampakKunci ? '(TIDAK DICETAK — berisi private key)' : (nilai || '(kosong)')}`);
+
+    if (tampakKunci) {
+      adaMasalah = true;
+      console.log('');
+      console.log('   ✗✗ BAHAYA: variabel ini berisi PRIVATE KEY, bukan nilai yang seharusnya.');
+      console.log('      Nilai ini dikirim ke Google sebagai bagian URL permintaan, jadi kuncinya');
+      console.log('      berisiko sudah tercatat di log server maupun halaman error.');
+      console.log('      → GANTI private key di Google Cloud Console → IAM & Admin →');
+      console.log('        Service Accounts → tab Keys → hapus yang lama, buat yang baru.');
+      if (v.endsWith('PROJECT_ID')) {
+        console.log('      → Isi variabel ini dengan field "project_id" dari file JSON');
+        console.log('        (contoh: nama-project-12345).');
+      } else {
+        console.log('      → Isi variabel ini dengan field "client_email" dari file JSON.');
+      }
+    } else if (!nilai) {
+      console.log('   ✗ KOSONG'); adaMasalah = true;
+    } else if (v.endsWith('PROJECT_ID') && !/^[a-z0-9][a-z0-9-]{3,29}$/.test(nilai)) {
+      console.log('   ✗ tidak berbentuk ID project (huruf kecil, angka, tanda hubung)'); adaMasalah = true;
+    } else if (v.endsWith('CLIENT_EMAIL') && !nilai.endsWith('.iam.gserviceaccount.com')) {
+      console.log('   ✗ tidak berbentuk email service account (@<project>.iam.gserviceaccount.com)'); adaMasalah = true;
     }
     console.log('');
     continue;
