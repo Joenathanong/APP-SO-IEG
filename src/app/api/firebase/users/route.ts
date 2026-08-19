@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { adminAuth, adminDb } from '@/lib/firebase-admin';
+import { getAdminAuth, getAdminDb } from '@/lib/firebase-admin';
+
+// Route ini menyentuh kredensial runtime, jadi jangan sampai dianalisis
+// sebagai halaman statis saat build.
+export const dynamic = 'force-dynamic';
 import { AppUser } from '@/types';
 
 export async function GET() {
   try {
-    const snapshot = await adminDb.collection('users').get();
+    const snapshot = await getAdminDb().collection('users').get();
     const users: AppUser[] = snapshot.docs.map((doc) => ({
       uid: doc.id,
       ...doc.data(),
@@ -27,7 +31,7 @@ export async function POST(req: NextRequest) {
     };
 
     // Create Firebase Auth user
-    const userRecord = await adminAuth.createUser({
+    const userRecord = await getAdminAuth().createUser({
       email,
       password,
       displayName: name,
@@ -44,7 +48,7 @@ export async function POST(req: NextRequest) {
       updatedAt: now,
     };
 
-    await adminDb.collection('users').doc(userRecord.uid).set(userData);
+    await getAdminDb().collection('users').doc(userRecord.uid).set(userData);
 
     return NextResponse.json({
       uid: userRecord.uid,
@@ -66,11 +70,11 @@ export async function PUT(req: NextRequest) {
       updatedAt: new Date().toISOString(),
     };
 
-    await adminDb.collection('users').doc(uid).update(updatedData);
+    await getAdminDb().collection('users').doc(uid).update(updatedData);
 
     // If name changed, update Firebase Auth display name too
     if (updates.name) {
-      await adminAuth.updateUser(uid, { displayName: updates.name });
+      await getAdminAuth().updateUser(uid, { displayName: updates.name });
     }
 
     return NextResponse.json({ success: true });
