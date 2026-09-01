@@ -17,6 +17,26 @@ const prisma = new PrismaClient();
 const FILE = process.argv.find((a) => a.endsWith('.xlsx')) ?? 'MASTER_GABUNGAN_v2.xlsx';
 const DRY = process.argv.includes('--dry-run');
 
+/**
+ * Jumlah baris per PERNYATAAN SQL.
+ *
+ * Riwayat singkat, supaya tidak diulang: versi pertama memakai
+ * `prisma.material.upsert()` satu per satu — Prisma menerjemahkan tiap upsert
+ * jadi DUA query (cek dulu, baru tulis), sehingga 562 material = 1.124
+ * perjalanan bolak-balik ke Singapura. Terukur ~44 detik per 100 baris.
+ *
+ * Membungkusnya dalam `$transaction([...])` TIDAK menolong: transaksi hanya
+ * menyatukan commit, perjalanan jaringannya tetap satu per pernyataan.
+ *
+ * Yang benar adalah satu pernyataan `INSERT ... ON DUPLICATE KEY UPDATE` berisi
+ * banyak baris. 562 material jadi 3 pernyataan, bukan 1.124.
+ *
+ * 200 baris × ~18 kolom ≈ 3.600 placeholder, jauh di bawah batas 65.535.
+ */
+const UKURAN_BATCH = 200;
+
+function detik(ms: number) { return (ms / 1000).toFixed(1) + 's'; }
+
 /** Cari baris header berdasarkan kolom yang pasti ada — jangan asumsikan nomor
  *  barisnya, karena file tinjauan punya beberapa baris legenda di atas. */
 function readSheet(wb: XLSX.WorkBook, sheetName: string, anchor: string) {
@@ -40,12 +60,90 @@ function parseDecision(v: string): 'skip' | 'nonaktif' | 'ok' {
   return 'ok';
 }
 
+
+/**
+ * Tulis banyak baris dalam SATU pernyataan.
+ *
+ * Nama tabel memakai @@map (materials/bins), tapi nama KOLOM mengikuti nama
+ * field Prisma apa adanya karena tidak ada @map di level field — jadi camelCase,
+ * dan wajib dikutip backtick di MySQL/TiDB.
+ *
+ * `createdAt` hanya diisi saat baris baru; `updatedAt` selalu diperbarui.
+ * Keduanya diisi eksplisit karena `@updatedAt` adalah perilaku Prisma Client,
+ * bukan default kolom — jalur SQL mentah tidak melewatinya.
+ *
+ * Kalau jalur cepat ini gagal karena alasan apa pun, seed TIDAK berhenti:
+ * ia mundur ke upsert per baris yang lebih lambat tapi pasti jalan.
+ */
+async function tulisMaterial(rows: Prisma.MaterialUncheckedCreateInput[]) {
+  try {
+    const nilai = rows.map(
+      (d) => Prisma.sql`(${d.ocsCode}, ${d.name}, ${d.category ?? null}, ${d.sapCodeIeg ?? null}, ${d.sapCodeEji ?? null},
+        ${d.barcodeProduct ?? null}, ${d.barcodeBpom ?? null}, ${d.normOcsCode}, ${d.normSapIeg ?? null},
+        ${d.normSapEji ?? null}, ${d.normBarcodeProduct ?? null}, ${d.normBarcodeBpom ?? null},
+        ${d.active ?? true}, ${d.source ?? null}, ${d.reviewNote ?? null}, NOW(3), NOW(3))`
+    );
+    await prisma.$executeRaw`
+      INSERT INTO \`materials\`
+        (\`ocsCode\`, \`name\`, \`category\`, \`sapCodeIeg\`, \`sapCodeEji\`,
+         \`barcodeProduct\`, \`barcodeBpom\`, \`normOcsCode\`, \`normSapIeg\`,
+         \`normSapEji\`, \`normBarcodeProduct\`, \`normBarcodeBpom\`,
+         \`active\`, \`source\`, \`reviewNote\`, \`createdAt\`, \`updatedAt\`)
+      VALUES ${Prisma.join(nilai)}
+      ON DUPLICATE KEY UPDATE
+        \`name\` = VALUES(\`name\`), \`category\` = VALUES(\`category\`),
+        \`sapCodeIeg\` = VALUES(\`sapCodeIeg\`), \`sapCodeEji\` = VALUES(\`sapCodeEji\`),
+        \`barcodeProduct\` = VALUES(\`barcodeProduct\`), \`barcodeBpom\` = VALUES(\`barcodeBpom\`),
+        \`normOcsCode\` = VALUES(\`normOcsCode\`), \`normSapIeg\` = VALUES(\`normSapIeg\`),
+        \`normSapEji\` = VALUES(\`normSapEji\`), \`normBarcodeProduct\` = VALUES(\`normBarcodeProduct\`),
+        \`normBarcodeBpom\` = VALUES(\`normBarcodeBpom\`), \`active\` = VALUES(\`active\`),
+        \`source\` = VALUES(\`source\`), \`reviewNote\` = VALUES(\`reviewNote\`),
+        \`updatedAt\` = NOW(3)`;
+  } catch (e: any) {
+    console.warn(`[seed] jalur cepat material gagal (${e?.message ?? e}) — mundur ke upsert per baris`);
+    for (const d of rows) {
+      await prisma.material.upsert({ where: { ocsCode: d.ocsCode }, create: d, update: d });
+    }
+  }
+}
+
+async function tulisBin(rows: Prisma.BinUncheckedCreateInput[]) {
+  try {
+    const nilai = rows.map(
+      (d) => Prisma.sql`(${d.code}, ${d.normCode}, ${d.binType ?? null}, ${d.warehouse ?? null},
+        ${d.description ?? null}, ${d.active ?? true}, ${d.needsReview ?? false},
+        ${d.scanCount ?? 0}, ${d.variants ?? null}, NOW(3), NOW(3))`
+    );
+    await prisma.$executeRaw`
+      INSERT INTO \`bins\`
+        (\`code\`, \`normCode\`, \`binType\`, \`warehouse\`, \`description\`,
+         \`active\`, \`needsReview\`, \`scanCount\`, \`variants\`, \`createdAt\`, \`updatedAt\`)
+      VALUES ${Prisma.join(nilai)}
+      ON DUPLICATE KEY UPDATE
+        \`code\` = VALUES(\`code\`), \`binType\` = VALUES(\`binType\`),
+        \`warehouse\` = VALUES(\`warehouse\`), \`description\` = VALUES(\`description\`),
+        \`active\` = VALUES(\`active\`), \`needsReview\` = VALUES(\`needsReview\`),
+        \`scanCount\` = VALUES(\`scanCount\`), \`variants\` = VALUES(\`variants\`),
+        \`updatedAt\` = NOW(3)`;
+  } catch (e: any) {
+    console.warn(`[seed] jalur cepat bin gagal (${e?.message ?? e}) — mundur ke upsert per baris`);
+    for (const d of rows) {
+      await prisma.bin.upsert({ where: { normCode: d.normCode }, create: d, update: d });
+    }
+  }
+}
+
 async function main() {
   console.log(`[seed] membaca ${FILE}${DRY ? ' (DRY RUN — tidak menulis apa pun)' : ''}`);
   const wb = XLSX.readFile(FILE);
+  console.log('[seed] berkas terbaca, menyiapkan data...');
 
   // ── MATERIAL ─────────────────────────────────────────────────────────────
+  const antreanMaterial: Prisma.MaterialUncheckedCreateInput[] = [];
+  const antreanBin: Prisma.BinUncheckedCreateInput[] = [];
+
   const mats = readSheet(wb, 'Material', 'Kode OCS');
+  console.log(`[seed] ${mats.length} baris material terbaca dari berkas`);
   let mIn = 0, mSkip = 0, mOff = 0;
   const seenOcs = new Set<string>();
 
@@ -80,15 +178,23 @@ async function main() {
       reviewNote: r['Catatan'] || null,
     } satisfies Prisma.MaterialUncheckedCreateInput;
 
-    if (!DRY) {
-      await prisma.material.upsert({ where: { ocsCode }, create: data, update: data });
-    }
+    antreanMaterial.push(data);
     mIn++;
+  }
+
+  if (!DRY && antreanMaterial.length) {
+    const t0 = Date.now();
+    for (let i = 0; i < antreanMaterial.length; i += UKURAN_BATCH) {
+      const bagian = antreanMaterial.slice(i, i + UKURAN_BATCH);
+      await tulisMaterial(bagian);
+      console.log(`[seed] material ${Math.min(i + bagian.length, antreanMaterial.length)}/${antreanMaterial.length} (${detik(Date.now() - t0)})`);
+    }
   }
   console.log(`[seed] material: ${mIn} dimuat, ${mSkip} dilewati, ${mOff} ditandai tidak aktif`);
 
   // ── BIN ──────────────────────────────────────────────────────────────────
   const bins = readSheet(wb, 'Bin', 'Kode Bin');
+  console.log(`[seed] ${bins.length} baris bin terbaca dari berkas`);
   let bIn = 0, bSkip = 0, bReview = 0;
   const seenBin = new Set<string>();
 
@@ -116,10 +222,17 @@ async function main() {
       active: true,
     } satisfies Prisma.BinUncheckedCreateInput;
 
-    if (!DRY) {
-      await prisma.bin.upsert({ where: { normCode }, create: data, update: data });
-    }
+    antreanBin.push(data);
     bIn++;
+  }
+
+  if (!DRY && antreanBin.length) {
+    const t0 = Date.now();
+    for (let i = 0; i < antreanBin.length; i += UKURAN_BATCH) {
+      const bagian = antreanBin.slice(i, i + UKURAN_BATCH);
+      await tulisBin(bagian);
+      console.log(`[seed] bin ${Math.min(i + bagian.length, antreanBin.length)}/${antreanBin.length} (${detik(Date.now() - t0)})`);
+    }
   }
   console.log(`[seed] bin: ${bIn} dimuat, ${bSkip} dilewati, ${bReview} bertanda perlu ditinjau`);
 

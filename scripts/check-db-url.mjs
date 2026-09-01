@@ -8,21 +8,51 @@
  */
 import { readFileSync, existsSync } from 'node:fs';
 
-function loadEnv() {
-  for (const f of ['.env', '.env.local']) {
-    if (!existsSync(f)) continue;
-    for (const line of readFileSync(f, 'utf8').split('\n')) {
-      const m = line.match(/^\s*DATABASE_URL\s*=\s*(.*)\s*$/);
-      if (m) {
-        let v = m[1].trim();
-        if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
-          v = v.slice(1, -1);
-        }
-        return { value: v, file: f, quoted: /^["']/.test(m[1].trim()) };
+function bacaSatu(f) {
+  if (!existsSync(f)) return null;
+  for (const line of readFileSync(f, 'utf8').split('\n')) {
+    const m = line.match(/^\s*DATABASE_URL\s*=\s*(.*)\s*$/);
+    if (m) {
+      let v = m[1].trim();
+      const quoted = /^["']/.test(v);
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+        v = v.slice(1, -1);
       }
+      return { value: v, file: f, quoted };
     }
   }
   return null;
+}
+
+function namaDb(u) {
+  try { return decodeURIComponent(new URL(u).pathname.replace(/^\//, '')); } catch { return null; }
+}
+
+/**
+ * PENTING — dua alat membaca berkas yang BERBEDA:
+ *   • Prisma CLI (db:push, seed) hanya membaca `.env`
+ *   • Next.js (dev, build) memprioritaskan `.env.local` DI ATAS `.env`
+ *
+ * Kalau keduanya memuat DATABASE_URL yang berbeda, Anda bisa membuat tabel di
+ * satu database lalu membacanya dari database lain — dan gejalanya muncul
+ * sebagai "tabel tidak ada" padahal db:push jelas berhasil.
+ */
+function loadEnv() {
+  const dariEnv = bacaSatu('.env');
+  const dariLocal = bacaSatu('.env.local');
+
+  if (dariEnv && dariLocal) {
+    const a = namaDb(dariEnv.value), b = namaDb(dariLocal.value);
+    console.log('PERINGATAN     : DATABASE_URL ada di .env DAN .env.local');
+    console.log(`                 Prisma CLI (db:push, seed) memakai .env       → database "${a ?? '?'}"`);
+    console.log(`                 Next.js (dev, build) memakai .env.local        → database "${b ?? '?'}"`);
+    if (a !== b) {
+      console.log('                 ✗ KEDUANYA BERBEDA — tabel dibuat di satu tempat,');
+      console.log('                   dibaca dari tempat lain. Samakan, atau hapus .env.local.');
+    }
+    console.log('');
+  }
+  return dariEnv ?? dariLocal;
 }
 
 const found = loadEnv();
@@ -76,6 +106,18 @@ if (dbName.includes('<')) err.push(`nama database masih berisi placeholder: "${d
 
 if (u.protocol !== 'mysql:') err.push(`protokol harus "mysql", bukan "${u.protocol.replace(':', '')}"`);
 if (!dbName) err.push('nama database KOSONG — harus ada di antara "/" dan "?"');
+
+// TiDB menolak perubahan skema pada database sistem dengan P3004, dan pesannya
+// tidak menyebutkan bahwa yang salah cuma satu kata di URL.
+const SISTEM = ['sys', 'mysql', 'information_schema', 'performance_schema', 'metrics_schema'];
+if (SISTEM.includes(dbName.toLowerCase())) {
+  err.push(
+    `"${dbName}" adalah DATABASE SISTEM — Prisma menolak membuat tabel di sini (error P3004). ` +
+    `Ganti nama database di URL menjadi database aplikasi Anda, misalnya stock_opname.`
+  );
+} else if (dbName.toLowerCase() === 'test') {
+  warn.push('database bernama "test" adalah bawaan TiDB Cloud — pastikan itu memang yang Anda maksud');
+}
 if (dbName.includes('=') || dbName.includes('&')) {
   err.push(`nama database berisi "=" atau "&" → tanda "?" sebelum parameter hilang. ` +
            `Sekarang terbaca sebagai nama database: "${dbName}"`);

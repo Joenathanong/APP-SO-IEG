@@ -48,3 +48,51 @@ export async function withWriteRetry<T>(fn: () => Promise<T>, attempts = 4): Pro
   }
   throw lastErr;
 }
+
+
+/**
+ * Terjemahkan error Prisma jadi kalimat yang menyebutkan APA YANG HARUS
+ * DILAKUKAN.
+ *
+ * Kode mentah seperti P2021 muncul di layar sebagai "HTTP 500", dan pesan
+ * aslinya ("The table `opname_sessions` does not exist") hanya ada di log
+ * server. Padahal perbaikannya satu perintah. Jarak antara gejala dan tindakan
+ * itulah yang paling banyak memakan waktu selama pengembangan ini.
+ */
+export function pesanPrisma(e: any): string {
+  const kode = e?.code;
+  const pesan = String(e?.message ?? e ?? '');
+
+  // KOLOM diperiksa LEBIH DULU: pesan P2022 memuat frasa yang sama dengan P2021
+  // ("does not exist in the current database"), jadi urutan terbalik akan
+  // melaporkan kolom yang hilang sebagai tabel yang hilang.
+  if (kode === 'P2022' || /column `?[\w.]+`? does not exist/i.test(pesan)) {
+    const kolom = pesan.match(/column `?([\w.]+)`?/i)?.[1];
+    return (
+      `Kolom${kolom ? ` \`${kolom}\`` : ''} belum ada di database. ` +
+      `Skema berubah tapi belum diterapkan — jalankan: npm run db:push`
+    );
+  }
+  if (kode === 'P2021' || /table `?[\w.]+`? does not exist/i.test(pesan)) {
+    const tabel = pesan.match(/table `?([\w.]+)`?/i)?.[1];
+    return (
+      `Tabel${tabel ? ` \`${tabel}\`` : ''} belum ada di database. ` +
+      `Skema belum pernah diterapkan — jalankan: npm run db:push`
+    );
+  }
+  if (kode === 'P1001' || /Can't reach database server/i.test(pesan)) {
+    return (
+      'Database tidak terjangkau. Periksa apakah cluster TiDB hidup, jaringan Anda ' +
+      'mengizinkan port 4000, dan IP Access List di TiDB Cloud mengizinkan alamat Anda.'
+    );
+  }
+  if (kode === 'P1000' || /Authentication failed/i.test(pesan)) {
+    return 'Kredensial database ditolak. Periksa user dan password di DATABASE_URL — jalankan: npm run check:db';
+  }
+  if (/Environment variable not found: DATABASE_URL/i.test(pesan)) {
+    return 'DATABASE_URL belum terisi. Periksa .env (dan pastikan .env.local tidak menimpanya).';
+  }
+  if (kode === 'P2002') return 'Data dengan nilai unik yang sama sudah ada.';
+  if (kode === 'P2025') return 'Data yang dituju tidak ditemukan.';
+  return pesan || 'Kesalahan tidak dikenal pada database.';
+}
