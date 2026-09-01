@@ -148,35 +148,107 @@ model OpnameSession {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  entries    SoEntry[]
-  bookStocks BookStock[]
-  binCounts  BinCount[]
+  /// Snapshot saldo buku yang dipakai sesi ini sebagai PEMBANDING.
+  /// Sengaja hanya penunjuk, bukan kepemilikan: satu snapshot bisa dipakai
+  /// beberapa sesi, dan penunjuk ini boleh diganti kapan saja — termasuk saat
+  /// SO sudah berjalan — tanpa menyentuh satu pun baris hasil scan.
+  bookSnapshotId Int?
+
+  entries   SoEntry[]
+  binCounts BinCount[]
+
+  bookSnapshot BookStockSnapshot? @relation(fields: [bookSnapshotId], references: [id])
 
   @@index([status])
+  @@index([bookSnapshotId])
   @@map("opname_sessions")
 }
 
-/// Saldo buku per material per sesi — hasil import .xlsx dari export SAP/OCS.
+enum SnapshotSource {
+  OCS
+  UPLOAD
+}
+
+/// Satu POTRET saldo buku pada satu titik waktu.
+///
+/// Sebelumnya saldo buku menempel pada sesi, sehingga tidak ada cara menyimpan
+/// tarikan OCS tanpa langsung memakainya, dan tidak ada cara memakai ulang
+/// saldo periode lalu. Dengan snapshot berdiri sendiri, ketiganya jadi mungkin:
+/// tarikan terbaru selalu tersimpan walau tidak dipakai, snapshot lama tetap
+/// bisa dipilih sesi berikutnya, dan mengganti pembanding di tengah SO hanya
+/// mengubah satu kolom penunjuk.
+model BookStockSnapshot {
+  id     Int            @id @default(autoincrement())
+  /// Nama yang dilihat admin, mis. "stock-ocs-SO Agustus 2026". Unik supaya
+  /// dua tarikan tidak pernah tampil dengan nama sama di layar pemilihan.
+  name   String         @unique @db.VarChar(160)
+  source SnapshotSource @default(OCS)
+
+  /// Sesi yang MEMICU pembuatan snapshot ini — hanya jejak asal, bukan pemilik.
+  /// Sengaja Int biasa tanpa relasi: snapshot harus tetap hidup dan tetap bisa
+  /// dipilih walau sesi asalnya dihapus.
+  originSessionId Int?
+
+  fetchedAt      DateTime @default(now())
+  rowCount       Int      @default(0)
+  matchedCount   Int      @default(0)
+  /// Baris yang kodenya belum ada di master material. TIDAK dibuang — lihat
+  /// catatan di BookStock.materialId.
+  unmatchedCount Int      @default(0)
+  totalQty       Decimal  @default(0) @db.Decimal(18, 3)
+
+  createdBy String? @db.VarChar(64)
+  notes     String? @db.VarChar(512)
+
+  items    BookStock[]
+  sessions OpnameSession[]
+
+  @@index([originSessionId])
+  @@index([fetchedAt])
+  @@map("book_stock_snapshots")
+}
+
+/// Satu baris saldo buku di dalam sebuah snapshot.
 /// Terverifikasi di audit: kolom "Jumlah OCS" = "Qty On Hand" di Data OCS
-/// (361 cocok, 0 berbeda).
+/// (361 cocok, 0 berbeda) — karena itu qtyBook diisi dari QtyOnHand.
 model BookStock {
   id         Int @id @default(autoincrement())
-  sessionId  Int
-  materialId Int
+  snapshotId Int
 
+  /// NULLABLE dengan sengaja, sama alasannya dengan SoEntry.materialId.
+  /// Terukur: dari 467 item OCS yang PUNYA stok, 44 belum ada di master
+  /// material. Membuangnya berarti barang yang benar-benar ada di gudang tidak
+  /// punya saldo pembanding, dan hasil hitungnya nanti tampak sebagai selisih
+  /// penuh — kesalahan yang jauh lebih mahal daripada baris yang materialnya
+  /// perlu dilengkapi belakangan.
+  materialId Int?
+
+  /// Saldo pembanding. Dari OCS ini adalah QtyOnHand.
   qtyBook Decimal @db.Decimal(18, 3)
 
-  /// Teks kode asli dari file import, disimpan apa adanya untuk penelusuran
-  /// bila materialnya nanti ternyata salah dipetakan.
-  rawCode String? @db.VarChar(96)
+  /// Pecahan per gudang dari OCS, disimpan sebagai INFORMASI saja.
+  /// Sengaja tidak dipakai sebagai target hitung: pada 18 dari 465 SKU,
+  /// kecil+besar TIDAK sama dengan QtyOnHand, dan sebagian QtyGudangKecil
+  /// bernilai negatif (terparah −3.624). Menjadikannya target berarti
+  /// mencampur salah hitung operator dengan penyimpangan data di sisi OCS.
+  qtyKecil Decimal? @db.Decimal(18, 3)
+  qtyBesar Decimal? @db.Decimal(18, 3)
+
+  /// Kode asli dari sumber. INILAH kunci alami baris ini — bukan materialId,
+  /// yang boleh kosong.
+  rawCode    String  @db.VarChar(96)
+  /// Nama dan kode SAP apa adanya dari sumber, supaya baris yang belum punya
+  /// material tetap bisa dikenali manusia di layar tinjau.
+  rawName    String? @db.VarChar(512)
+  rawSapCode String? @db.VarChar(32)
 
   createdAt DateTime @default(now())
 
-  session  OpnameSession @relation(fields: [sessionId], references: [id])
-  material Material      @relation(fields: [materialId], references: [id])
+  snapshot BookStockSnapshot @relation(fields: [snapshotId], references: [id])
+  material Material?         @relation(fields: [materialId], references: [id])
 
-  @@unique([sessionId, materialId])
-  @@index([sessionId])
+  @@unique([snapshotId, rawCode])
+  @@index([snapshotId])
   @@index([materialId])
   @@map("book_stocks")
 }

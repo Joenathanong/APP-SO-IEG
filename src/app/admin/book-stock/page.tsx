@@ -4,33 +4,52 @@ import { AppLayout } from '@/components/layout/AppLayout';
 import { Button } from '@/components/ui/Button';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/hooks/useToast';
-import { Upload, FileSpreadsheet, Loader2, AlertTriangle, CheckCircle2, RefreshCw } from 'lucide-react';
+import {
+  Upload, FileSpreadsheet, Loader2, AlertTriangle, CheckCircle2,
+  RefreshCw, Download, Database, Trash2, Check,
+} from 'lucide-react';
 
-interface BarisBuku { ocsCode: string; name: string; category: string | null; qtyBook: number }
+interface Snapshot {
+  id: number; name: string; source: 'OCS' | 'UPLOAD'; fetchedAt: string;
+  rowCount: number; matchedCount: number; unmatchedCount: number;
+  totalQty: number; createdBy: string | null; notes: string | null;
+}
+interface SesiAktif {
+  id: number; code: string; name: string; status: string; bookSnapshotId: number | null;
+}
 interface Pratinjau { kode: string; qty: number }
 
+function waktu(iso: string) {
+  try { return new Date(iso).toLocaleString('id-ID', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+  catch { return iso; }
+}
+
 export default function BookStockPage() {
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const { showSuccess, showError, showWarning } = useToast();
   const isAdmin = user?.role === 'administrator';
 
-  const [sesi, setSesi] = useState<any>(null);
-  const [items, setItems] = useState<BarisBuku[]>([]);
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [sesi, setSesi] = useState<SesiAktif | null>(null);
   const [loading, setLoading] = useState(false);
+  const [menarik, setMenarik] = useState(false);
+  const [mengganti, setMengganti] = useState<number | null>(null);
+  const [merapikan, setMerapikan] = useState<number | null>(null);
+
   const [pratinjau, setPratinjau] = useState<Pratinjau[] | null>(null);
   const [namaFile, setNamaFile] = useState('');
-  const [replace, setReplace] = useState(true);
   const [importing, setImporting] = useState(false);
-  const [hasil, setHasil] = useState<any>(null);
 
   const muat = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/book-stock', { cache: 'no-store' });
+      const res = await fetch('/api/book-stock/snapshots', { cache: 'no-store' });
       const j = await res.json();
-      setSesi(j.session); setItems(j.items ?? []);
+      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+      setSnapshots(j.snapshots ?? []);
+      setSesi(j.sesiAktif ?? null);
     } catch (e: any) {
-      showError('Gagal memuat saldo buku', e.message);
+      showError('Gagal memuat daftar snapshot', e.message);
     } finally {
       setLoading(false);
     }
@@ -38,13 +57,97 @@ export default function BookStockPage() {
 
   useEffect(() => { muat(); }, [muat]);
 
+  const tarikOcs = async () => {
+    setMenarik(true);
+    try {
+      const res = await fetch('/api/book-stock/snapshots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sumber: 'ocs', nama: sesi?.name, sessionId: sesi?.id, createdBy: user?.name }),
+      });
+      const j = await res.json();
+      if (!res.ok) {
+        // Sebab kegagalan dibedakan supaya saran tindakannya benar — "jaringan
+        // bermasalah" untuk semua kasus adalah pesan yang menyesatkan.
+        const saran =
+          j.sebab === 'konfigurasi' ? 'Isi OCS_USERNAME / OCS_PASSWORD di environment variable.'
+          : j.sebab === 'kredensial' ? 'Akun OCS ditolak — periksa user, password, dan hak aksesnya.'
+          : j.sebab === 'jaringan' ? 'OCS tidak menjawab. Coba lagi; kalau berulang, cek sistem OCS-nya.'
+          : 'Coba lagi beberapa saat lagi.';
+        throw new Error(`${j.error}\n${saran}`);
+      }
+      showSuccess('Snapshot tersimpan', `${j.snapshot.name} — ${j.snapshot.rowCount} baris`);
+      if (j.snapshot.unmatchedCount > 0) {
+        showWarning(
+          `${j.snapshot.unmatchedCount} item belum ada di master`,
+          'Angkanya tetap tersimpan. Tekan "Tambahkan ke master" pada baris snapshot untuk melengkapinya.'
+        );
+      }
+      muat();
+    } catch (e: any) {
+      showError('Gagal menarik dari OCS', e.message);
+    } finally {
+      setMenarik(false);
+    }
+  };
+
+  const pakaiSnapshot = async (id: number) => {
+    if (!sesi) { showError('Belum ada sesi opname yang dibuka.'); return; }
+    setMengganti(id);
+    try {
+      const res = await fetch(`/api/sessions/${sesi.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'set-snapshot', snapshotId: id }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || 'Gagal mengganti pembanding');
+      showSuccess('Pembanding diganti', 'Angka selisih dihitung ulang; hasil scan tidak tersentuh.');
+      muat();
+    } catch (e: any) {
+      showError('Gagal mengganti pembanding', e.message);
+    } finally {
+      setMengganti(null);
+    }
+  };
+
+  const tambahKeMaster = async (id: number) => {
+    setMerapikan(id);
+    try {
+      const res = await fetch(`/api/book-stock/snapshots/${id}/tambah-material`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || 'Gagal menambahkan');
+      showSuccess('Master diperbarui', `${j.dibuat} material baru dibuat, ${j.disambungkan} baris tersambung.`);
+      showWarning('Barcode belum terisi', 'Material baru belum punya barcode, jadi belum bisa discan. Lengkapi di menu Master Material.');
+      muat();
+    } catch (e: any) {
+      showError('Gagal menambahkan ke master', e.message);
+    } finally {
+      setMerapikan(null);
+    }
+  };
+
+  const hapus = async (s: Snapshot) => {
+    if (!window.confirm(`Hapus snapshot "${s.name}" beserta ${s.rowCount} barisnya?`)) return;
+    try {
+      const res = await fetch(`/api/book-stock/snapshots/${s.id}`, { method: 'DELETE' });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || 'Gagal menghapus');
+      showSuccess('Snapshot dihapus');
+      muat();
+    } catch (e: any) {
+      showError('Gagal menghapus', e.message);
+    }
+  };
+
   /**
    * File diurai di BROWSER, bukan diunggah mentah. Server hanya menerima
    * pasangan {kode, qty} sehingga tidak perlu menangani unggahan berkas, dan
    * Anda bisa melihat isinya sebelum ada satu baris pun masuk database.
    */
   const pilihFile = async (file: File) => {
-    setHasil(null);
     setNamaFile(file.name);
     try {
       const XLSX = await import('xlsx');
@@ -79,206 +182,218 @@ export default function BookStockPage() {
         const qty = parseFloat(String(r[kolQty] ?? '0').replace(/,/g, '.')) || 0;
         rows.push({ kode, qty });
       }
-      if (rows.length === 0) {
-        showError('Tidak ada baris data', 'Periksa isi file.');
-        return;
-      }
+      if (rows.length === 0) { showError('Tidak ada baris data', 'Periksa isi file.'); return; }
       setPratinjau(rows);
-      showSuccess('File terbaca', `${rows.length} baris siap di-import`);
+      showSuccess('File terbaca', `${rows.length} baris siap disimpan sebagai snapshot`);
     } catch (e: any) {
       showError('Gagal membaca file', e.message);
     }
   };
 
-  const jalankanImport = async () => {
+  const simpanUpload = async () => {
     if (!pratinjau) return;
     setImporting(true);
     try {
       const res = await fetch('/api/book-stock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows: pratinjau, replace }),
+        body: JSON.stringify({ rows: pratinjau, nama: `upload-${namaFile.replace(/\.[^.]+$/, '')}`, createdBy: user?.name }),
       });
       const j = await res.json();
-      if (!res.ok) throw new Error(j.error || 'Import gagal');
-      setHasil(j);
-      if (j.tidakDikenal > 0) {
-        showWarning('Import selesai dengan catatan', `${j.tidakDikenal} kode tidak ditemukan di master`);
-      } else {
-        showSuccess('Import selesai', `${j.tersimpan} baris tersimpan`);
-      }
-      setPratinjau(null);
+      if (!res.ok) throw new Error(j.error || 'Gagal menyimpan');
+      showSuccess('Snapshot tersimpan', `${j.snapshot.name} — ${j.tersimpan} baris`);
+      if (j.tidakDikenal > 0) showWarning(`${j.tidakDikenal} kode belum ada di master`, 'Tetap tersimpan; bisa dilengkapi lewat tombol di baris snapshot.');
+      setPratinjau(null); setNamaFile('');
       muat();
     } catch (e: any) {
-      showError('Import gagal', e.message);
+      showError('Gagal menyimpan', e.message);
     } finally {
       setImporting(false);
     }
   };
 
-  const total = items.reduce((s, i) => s + i.qtyBook, 0);
+  // Penjaga akses menunggu auth selesai dulu. Menampilkan "Akses ditolak"
+  // selagi `user` masih null adalah kebohongan sesaat yang bikin panik.
+  if (authLoading) {
+    return <AppLayout><div className="p-12 flex justify-center"><Loader2 className="animate-spin text-gray-400" /></div></AppLayout>;
+  }
+  if (!isAdmin) {
+    return (
+      <AppLayout>
+        <div className="max-w-lg mx-auto mt-12 p-6 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-xl">
+          <p className="font-semibold text-amber-800 dark:text-amber-300">Halaman ini khusus administrator</p>
+          <p className="text-sm text-amber-700 dark:text-amber-400 mt-1">
+            Akun Anda ({user?.email ?? 'belum masuk'}) berperan <strong>{user?.role ?? '—'}</strong>.
+            Minta admin mengubah peran bila Anda memang perlu mengelola saldo buku.
+          </p>
+        </div>
+      </AppLayout>
+    );
+  }
 
   return (
     <AppLayout>
-      <div className="space-y-4">
-        <div>
-          <h1 className="text-xl font-bold text-gray-900 dark:text-white">Saldo Buku (Data OCS)</h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
-            Import kolom <strong>Qty On Hand</strong> dari export OCS. Saldo ini yang dibandingkan
-            dengan hasil hitung fisik di halaman Monitor.
-          </p>
+      <div className="space-y-5 max-w-5xl mx-auto">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+              <Database size={24} className="text-blue-600" />
+              Saldo Buku (Snapshot)
+            </h1>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
+              Potret stok OCS yang dipakai sebagai pembanding hasil opname.
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <Button onClick={muat} variant="ghost" size="sm" disabled={loading}>
+              <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Muat ulang
+            </Button>
+            <Button onClick={tarikOcs} loading={menarik} className="bg-blue-600 hover:bg-blue-700">
+              <Download size={15} /> Tarik dari OCS sekarang
+            </Button>
+          </div>
         </div>
 
-        {!sesi ? (
-          <div className="flex items-start gap-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl p-4">
-            <AlertTriangle size={18} className="text-amber-600 dark:text-amber-400 mt-0.5 flex-shrink-0" />
-            <div className="text-sm text-amber-800 dark:text-amber-300">
-              <strong>Belum ada sesi opname yang dibuka.</strong>
-              <span className="block text-xs mt-0.5 text-amber-700 dark:text-amber-400">
-                Saldo buku selalu terikat ke satu sesi. Buka sesi dulu di menu Sesi Opname.
-              </span>
-            </div>
-          </div>
-        ) : (
-          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4">
+        {/* Sesi aktif & pembanding yang sedang dipakai */}
+        <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4">
+          {!sesi ? (
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              Belum ada sesi opname yang terbuka. Snapshot tetap bisa ditarik dan disimpan sekarang,
+              lalu dipilih setelah sesi dibuka.
+            </p>
+          ) : (
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="text-sm">
-                <span className="text-gray-500 dark:text-gray-400">Sesi aktif:</span>{' '}
-                <span className="font-mono font-semibold text-gray-900 dark:text-white">{sesi.code}</span>{' '}
-                <span className="text-gray-600 dark:text-gray-400">— {sesi.name}</span>
+              <div>
+                <p className="text-xs text-gray-500 dark:text-gray-400">Sesi terbuka</p>
+                <p className="font-semibold text-gray-900 dark:text-white">{sesi.code} — {sesi.name}</p>
               </div>
-              <div className="flex items-center gap-4 text-sm">
-                <span className="text-gray-500 dark:text-gray-400">
-                  Sudah ter-import: <strong className="text-gray-900 dark:text-white">{items.length.toLocaleString('id-ID')}</strong> material
-                </span>
-                <span className="text-gray-500 dark:text-gray-400">
-                  Total qty: <strong className="text-gray-900 dark:text-white">{total.toLocaleString('id-ID')}</strong>
-                </span>
-                <Button onClick={muat} variant="outline" size="sm" loading={loading}><RefreshCw size={14} /></Button>
+              <div className="text-right">
+                <p className="text-xs text-gray-500 dark:text-gray-400">Pembanding dipakai</p>
+                <p className="font-semibold text-gray-900 dark:text-white">
+                  {snapshots.find((s) => s.id === sesi.bookSnapshotId)?.name ?? <span className="text-amber-600">belum dipilih</span>}
+                </p>
               </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
-        {/* Dua syarat berbeda, jadi sebutkan yang mana yang belum terpenuhi —
-            sebelumnya keduanya sama-sama membuat upload hilang tanpa keterangan. */}
-        {user && isAdmin && !sesi && (
-          <div className="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2">
-            <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
-            <span>Upload baru muncul setelah ada sesi opname yang dibuka. Buka sesi di menu <strong>Sesi Opname</strong>.</span>
-          </div>
-        )}
-        {isAdmin && sesi && (
-          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 space-y-4">
-            <label className="flex items-center justify-center gap-3 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-xl py-8 cursor-pointer hover:border-blue-400 dark:hover:border-blue-500 transition-colors">
-              <FileSpreadsheet size={22} className="text-gray-400" />
-              <span className="text-sm text-gray-600 dark:text-gray-400">
-                {namaFile || 'Pilih file .xlsx export dari OCS'}
-              </span>
-              <input
-                type="file" accept=".xlsx,.xls,.csv" className="hidden"
-                onChange={(e) => { const f = e.target.files?.[0]; if (f) pilihFile(f); }}
-              />
-            </label>
-
-            {pratinjau && (
-              <div className="space-y-3">
-                <div className="text-sm text-gray-700 dark:text-gray-300">
-                  <strong>{pratinjau.length.toLocaleString('id-ID')}</strong> baris terbaca. Contoh 5 pertama:
-                </div>
-                <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
-                  <table className="w-full text-xs">
-                    <thead className="bg-gray-50 dark:bg-gray-700/50">
-                      <tr><th className="px-3 py-2 text-left">Kode</th><th className="px-3 py-2 text-right">Qty</th></tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-                      {pratinjau.slice(0, 5).map((r, i) => (
-                        <tr key={i}>
-                          <td className="px-3 py-1.5 font-mono">{r.kode}</td>
-                          <td className="px-3 py-1.5 text-right">{r.qty.toLocaleString('id-ID')}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
-                  <input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} />
-                  Ganti seluruh saldo buku sesi ini (hapus yang lama dulu)
-                </label>
-                <div className="flex gap-3">
-                  <Button variant="outline" onClick={() => { setPratinjau(null); setNamaFile(''); }} className="flex-1">Batal</Button>
-                  <Button onClick={jalankanImport} loading={importing} className="flex-1">
-                    <Upload size={14} /> Import {pratinjau.length.toLocaleString('id-ID')} baris
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            {hasil && (
-              <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-3 text-sm space-y-1">
-                <div className="flex items-center gap-2 font-medium text-gray-900 dark:text-white">
-                  <CheckCircle2 size={15} className="text-green-600" /> Hasil import
-                </div>
-                <div className="text-gray-600 dark:text-gray-400 text-xs">
-                  Dibaca {hasil.dibaca} · Tersimpan <strong>{hasil.tersimpan}</strong> · Tidak dikenal {hasil.tidakDikenal}
-                </div>
-                {hasil.tidakDikenal > 0 && (
-                  <div className="text-xs text-amber-700 dark:text-amber-400 mt-1">
-                    Kode yang tidak ditemukan di master material (contoh):{' '}
-                    <span className="font-mono">{(hasil.contohTidakDikenal ?? []).join(', ')}</span>
-                    <span className="block mt-1">
-                      Material ini tidak akan muncul di rekonsiliasi. Tambahkan ke master lalu import ulang.
-                    </span>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {!user && (
-          <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
-            <Loader2 size={13} className="animate-spin" /> Memuat profil pengguna...
-          </div>
-        )}
-        {user && !isAdmin && (
-          <div className="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2">
-            <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
-            <span>Import saldo buku hanya untuk Administrator. Peran akun Anda: <strong>{user.role}</strong>.</span>
-          </div>
-        )}
-
+        {/* Daftar snapshot */}
         <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+            <h2 className="text-sm font-semibold text-gray-900 dark:text-white">
+              Snapshot tersimpan ({snapshots.length})
+            </h2>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+              Semuanya tetap tersimpan walau tidak dipakai. Pembanding boleh diganti kapan saja, termasuk saat SO berjalan —
+              yang berubah hanya penunjuknya, hasil scan tidak tersentuh.
+            </p>
+          </div>
+
           {loading ? (
-            <div className="flex items-center justify-center py-16 gap-3 text-gray-500">
-              <Loader2 size={20} className="animate-spin" /> Memuat...
-            </div>
-          ) : items.length === 0 ? (
-            <div className="text-center py-16 text-gray-400">
-              <FileSpreadsheet size={32} className="mx-auto mb-3 opacity-30" />
-              <p className="text-sm">Belum ada saldo buku untuk sesi ini.</p>
+            <div className="p-10 flex justify-center"><Loader2 className="animate-spin text-gray-400" /></div>
+          ) : snapshots.length === 0 ? (
+            <div className="p-10 text-center text-sm text-gray-400">
+              Belum ada snapshot. Tekan &quot;Tarik dari OCS sekarang&quot; untuk membuat yang pertama.
             </div>
           ) : (
-            <div className="overflow-x-auto max-h-[28rem]">
-              <table className="w-full text-sm">
-                <thead className="bg-gray-50 dark:bg-gray-700/50 border-b border-gray-200 dark:border-gray-700 sticky top-0">
-                  <tr>
-                    {['Kode OCS', 'Nama Produk', 'Kategori', 'Qty Buku'].map((h) => (
-                      <th key={h} className="px-3 py-2.5 text-left text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-                  {items.map((i) => (
-                    <tr key={i.ocsCode} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
-                      <td className="px-3 py-2 font-mono text-xs text-gray-900 dark:text-white whitespace-nowrap">{i.ocsCode}</td>
-                      <td className="px-3 py-2 text-xs text-gray-700 dark:text-gray-300 max-w-md truncate" title={i.name}>{i.name}</td>
-                      <td className="px-3 py-2 text-xs text-gray-500 dark:text-gray-400">{i.category ?? '—'}</td>
-                      <td className="px-3 py-2 text-right text-xs font-semibold text-gray-900 dark:text-white">{i.qtyBook.toLocaleString('id-ID')}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <ul className="divide-y divide-gray-100 dark:divide-gray-700">
+              {snapshots.map((s) => {
+                const dipakai = sesi?.bookSnapshotId === s.id;
+                return (
+                  <li key={s.id} className={`p-4 ${dipakai ? 'bg-blue-50/60 dark:bg-blue-900/10' : ''}`}>
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-semibold text-gray-900 dark:text-white break-all">{s.name}</span>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                            s.source === 'OCS'
+                              ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+                              : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300'
+                          }`}>{s.source === 'OCS' ? 'dari OCS' : 'dari file'}</span>
+                          {dipakai && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300 flex items-center gap-1">
+                              <Check size={10} /> sedang dipakai
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                          {waktu(s.fetchedAt)} · {s.rowCount} baris · total {s.totalQty.toLocaleString('id-ID')} pcs
+                          {s.createdBy ? ` · oleh ${s.createdBy}` : ''}
+                        </p>
+                        {s.unmatchedCount > 0 && (
+                          <div className="mt-2 flex items-start gap-2 text-xs text-amber-700 dark:text-amber-400">
+                            <AlertTriangle size={13} className="flex-shrink-0 mt-0.5" />
+                            <span>
+                              <strong>{s.unmatchedCount}</strong> item punya stok di OCS tapi belum ada di master material.
+                              Angkanya tetap tersimpan — kalau tidak ditambahkan, hasil hitung barang itu akan tampak sebagai selisih penuh.
+                            </span>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex flex-col gap-1.5 items-end flex-shrink-0">
+                        <Button
+                          size="sm"
+                          variant={dipakai ? 'ghost' : 'outline'}
+                          disabled={dipakai || !sesi}
+                          loading={mengganti === s.id}
+                          onClick={() => pakaiSnapshot(s.id)}
+                        >
+                          {dipakai ? 'Terpakai' : 'Pakai untuk sesi ini'}
+                        </Button>
+                        {s.unmatchedCount > 0 && (
+                          <Button size="sm" variant="outline" loading={merapikan === s.id} onClick={() => tambahKeMaster(s.id)}>
+                            Tambahkan {s.unmatchedCount} ke master
+                          </Button>
+                        )}
+                        <button
+                          onClick={() => hapus(s)}
+                          disabled={dipakai}
+                          className="text-xs text-gray-400 hover:text-red-500 disabled:opacity-40 disabled:hover:text-gray-400 flex items-center gap-1 px-2 py-1"
+                        >
+                          <Trash2 size={12} /> Hapus
+                        </button>
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        {/* Jalur cadangan: unggah file */}
+        <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 space-y-3">
+          <div>
+            <h2 className="text-sm font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+              <FileSpreadsheet size={16} className="text-gray-500" /> Unggah file (cadangan)
+            </h2>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+              Dipakai kalau OCS sedang tidak bisa dihubungi. Hasilnya jadi snapshot bernama, sama seperti tarikan OCS.
+            </p>
+          </div>
+
+          <label className="flex items-center gap-2 text-sm cursor-pointer text-blue-600 hover:text-blue-700">
+            <Upload size={15} />
+            <span>{namaFile || 'Pilih file .xlsx'}</span>
+            <input
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              className="hidden"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) pilihFile(f); }}
+            />
+          </label>
+
+          {pratinjau && (
+            <div className="p-3 bg-gray-50 dark:bg-gray-700/40 rounded-lg space-y-2">
+              <p className="text-sm text-gray-700 dark:text-gray-300 flex items-center gap-2">
+                <CheckCircle2 size={15} className="text-green-600" />
+                {pratinjau.length} baris terbaca dari {namaFile}
+              </p>
+              <div className="flex gap-2">
+                <Button size="sm" onClick={simpanUpload} loading={importing}>Simpan sebagai snapshot</Button>
+                <Button size="sm" variant="ghost" onClick={() => { setPratinjau(null); setNamaFile(''); }}>Batal</Button>
+              </div>
             </div>
           )}
         </div>

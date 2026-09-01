@@ -32,9 +32,21 @@ export async function GET(req: NextRequest) {
     };
     if (!sesi) return NextResponse.json(kosong);
 
+    // Saldo buku kini datang dari SNAPSHOT yang ditunjuk sesi, bukan dari baris
+    // milik sesi. Sesi tanpa snapshot bukan error: hasil scannya tetap tercatat,
+    // hanya belum punya pembanding.
+    if (!sesi.bookSnapshotId) {
+      return NextResponse.json({
+        ...kosong,
+        session: { id: sesi.id, code: sesi.code, name: sesi.name, status: sesi.status },
+        tanpaSnapshot: true,
+        pesan: 'Sesi ini belum punya snapshot saldo buku. Pilih atau tarik satu di menu Saldo Buku.',
+      });
+    }
+
     const [buku, hasil] = await Promise.all([
       prisma.bookStock.findMany({
-        where: { sessionId: sesi.id },
+        where: { snapshotId: sesi.bookSnapshotId, materialId: { not: null } },
         include: { material: { select: { id: true, ocsCode: true, name: true, category: true,
           sapCodeIeg: true, sapCodeEji: true, barcodeProduct: true, barcodeBpom: true } } },
       }),
@@ -49,9 +61,9 @@ export async function GET(req: NextRequest) {
     const hasilPer = new Map<number, number>();
     for (const h of hasil) if (h.materialId !== null) hasilPer.set(h.materialId, Number(h._sum.qtyPcs ?? 0));
 
-    const items = buku.map((b) => {
+    const items = buku.filter((b) => b.material !== null).map((b) => {
       const jumlahOCS = Number(b.qtyBook);
-      const hasilSO = hasilPer.get(b.materialId) ?? 0;
+      const hasilSO = (b.materialId !== null ? hasilPer.get(b.materialId) : undefined) ?? 0;
       const selisih = hasilSO - jumlahOCS;
       // Konsisten dengan aturan lama: hanya hasilSO > 0 yang dianggap sudah
       // dihitung secara fisik. Nol berarti belum ditemukan, bukan "nol unit".
@@ -59,13 +71,13 @@ export async function GET(req: NextRequest) {
       if (hasilSO > 0) status = selisih === 0 ? 'sesuai' : selisih > 0 ? 'surplus' : 'defisit';
       return {
         materialId: b.materialId,
-        materialOCS: b.material.ocsCode,
-        namaProduk: b.material.name,
-        materialIEG: b.material.sapCodeIeg ?? '',
-        materialEJI: b.material.sapCodeEji ?? '',
-        kategori: b.material.category || 'Lainnya',
-        barcodeProduct: b.material.barcodeProduct ?? '',
-        barcodeBPOM: b.material.barcodeBpom ?? '',
+        materialOCS: b.material!.ocsCode,
+        namaProduk: b.material!.name,
+        materialIEG: b.material!.sapCodeIeg ?? '',
+        materialEJI: b.material!.sapCodeEji ?? '',
+        kategori: b.material!.category || 'Lainnya',
+        barcodeProduct: b.material!.barcodeProduct ?? '',
+        barcodeBPOM: b.material!.barcodeBpom ?? '',
         jumlahOCS, hasilSO, selisih, status,
       };
     });

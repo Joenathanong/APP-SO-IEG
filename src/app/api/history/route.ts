@@ -75,6 +75,11 @@ export async function GET(req: NextRequest) {
           barcode: e.rawBarcode,
           sapCode: e.material?.sapCodeIeg ?? e.material?.sapCodeEji ?? e.rawMaterialText ?? '',
           ocsCode: e.material?.ocsCode ?? '',
+          // Ikut dikirim seperti cabang Gudang Besar. Tanpa baris ini kolom
+          // Batch di halaman History dan Data SO tampil '—' padahal nilainya
+          // ADA di database — persis jenis kebohongan tampilan yang bikin
+          // orang tidak percaya lagi pada laporannya.
+          batchDoc: e.batchDoc ?? '',
           qtyPcs: Number(e.qtyPcs),
         };
       })

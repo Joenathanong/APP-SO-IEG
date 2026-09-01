@@ -45,6 +45,14 @@ export default function GudangTransitPage() {
   const [masterNotFound, setMasterNotFound] = useState(false);
   const [isLooking, setIsLooking] = useState(false);
   const [qtyPcs, setQtyPcs] = useState(1);
+  // Batch / no. dokumen. Berbeda dari Gudang Besar, barcode di sini TIDAK
+  // membawa field batch, jadi nilainya diketik operator.
+  const [batchDoc, setBatchDoc] = useState('');
+  // Saat menghitung satu palet, batchnya sama untuk puluhan scan berturut-turut.
+  // Mengetik ulang tiap kali membuat operator berhenti mengisinya sama sekali.
+  // Default MATI dengan sengaja: batch yang terbawa diam-diam ke barang lain
+  // adalah data salah yang tidak terlihat siapa pun.
+  const [kunciBatch, setKunciBatch] = useState(false);
   const [location, setLocation] = useState('');
   const [notes, setNotes] = useState('');
   const [useManualBin, setUseManualBin] = useState(false);
@@ -61,12 +69,13 @@ export default function GudangTransitPage() {
     setMasterNotFound(false);
     setIsLooking(false);
     setQtyPcs(1);
+    setBatchDoc((b) => (kunciBatch ? b : ''));
     setLocation('');
     setNotes('');
     setUseManualBin(false);
     setFailedEntry(null);
     setShowDuplicateWarning(false);
-  }, []);
+  }, [kunciBatch]);
 
   // Step 1: Scan barcode → lookup master data
   const handleBarcodeScan = async (raw: string) => {
@@ -149,6 +158,7 @@ export default function GudangTransitPage() {
       shift,
       category: 'Gudang Transit',
       barcode,
+      batchDoc: batchDoc.trim(),
       sapCode:  masterData?.sapCode  || '',
       ocsCode:  masterData?.namaBarang || '',
       qtyPcs,
@@ -378,6 +388,36 @@ export default function GudangTransitPage() {
                   className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500 text-2xl font-bold text-center"
                 />
                 <p className="text-xs text-gray-500 mt-1 text-center">Tekan Enter untuk lanjut ke scan lokasi</p>
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    Batch / No. Dokumen <span className="text-gray-400 font-normal">(opsional)</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={kunciBatch}
+                      onChange={(e) => setKunciBatch(e.target.checked)}
+                      className="rounded border-gray-300 text-amber-600 focus:ring-amber-500"
+                    />
+                    Pertahankan untuk scan berikutnya
+                  </label>
+                </div>
+                <input
+                  type="text"
+                  value={batchDoc}
+                  onChange={(e) => setBatchDoc(e.target.value.toUpperCase().slice(0, 32))}
+                  onKeyDown={(e) => { if (e.key === 'Enter') setStep(3); }}
+                  placeholder="mis. B240815 — kosongkan bila tidak ada"
+                  maxLength={32}
+                  className="w-full px-4 py-2.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono text-sm uppercase"
+                />
+                {kunciBatch && batchDoc.trim() && (
+                  <p className="text-xs text-amber-700 dark:text-amber-400 mt-1">
+                    Batch <strong className="font-mono">{batchDoc.trim()}</strong> akan terpakai lagi pada scan berikutnya sampai Anda mengubahnya.
+                  </p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">

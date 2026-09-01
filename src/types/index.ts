@@ -54,6 +54,10 @@ export interface StockEntryKT {
   shift: string;
   category: 'Gudang Kecil' | 'Gudang Transit';
   barcode: string;
+  /// Batch / no. dokumen, DIKETIK operator — barcode Gudang Kecil & Transit
+  /// tidak membawa field ini seperti barcode Gudang Besar. Opsional dengan
+  /// sengaja: batch yang tidak diketahui tidak boleh menghalangi penyimpanan.
+  batchDoc?: string;
   sapCode: string;   // G
   ocsCode: string;   // H — nama barang dari Master_Gudang_Kecil (user menyebut ini "SKU OCS")
   qtyPcs: number;    // I

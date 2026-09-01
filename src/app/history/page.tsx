@@ -10,6 +10,7 @@ import { useToast } from '@/hooks/useToast';
 import { StockEntryGB, StockEntryKT } from '@/types';
 import { Search, Download, ChevronLeft, ChevronRight, AlertTriangle, Edit2, History } from 'lucide-react';
 import { format, parseISO, isValid, differenceInMinutes } from 'date-fns';
+import { adalahGudangBesar } from '@/lib/utils';
 
 type CombinedEntry = ((StockEntryGB | StockEntryKT) & { _sheet: string });
 
@@ -89,13 +90,14 @@ export default function HistoryPage() {
 
   // Filter
   const filtered = data.filter((e) => {
-    const isGB = e._sheet === 'gudang-besar';
+    const isGB = adalahGudangBesar(e._sheet);
     const gbE = e as StockEntryGB;
     const ktE = e as StockEntryKT;
     const searchLower = search.toLowerCase();
     const matchSearch = !search ||
       (isGB ? gbE.barcode : ktE.barcode).toLowerCase().includes(searchLower) ||
       (isGB ? gbE.description : '').toLowerCase().includes(searchLower) ||
+      (e.batchDoc ?? '').toLowerCase().includes(searchLower) ||
       e.location.toLowerCase().includes(searchLower);
     const matchUser = !userFilter || e.user.toLowerCase().includes(userFilter.toLowerCase());
     return matchSearch && matchUser;
@@ -118,7 +120,7 @@ export default function HistoryPage() {
 
   const handleOpenEdit = (entry: CombinedEntry) => {
     setEditEntry(entry);
-    const isGB = entry._sheet === 'gudang-besar';
+    const isGB = adalahGudangBesar(entry._sheet);
     setEditQty(isGB ? (entry as StockEntryGB).qtyCarton : (entry as StockEntryKT).qtyPcs);
     setEditLocation(entry.location);
     setEditNotes(entry.notes);
@@ -128,7 +130,7 @@ export default function HistoryPage() {
     if (!editEntry) return;
     setIsSavingEdit(true);
 
-    const isGB = editEntry._sheet === 'gudang-besar';
+    const isGB = adalahGudangBesar(editEntry._sheet);
     const rowIndex = editEntry.rowIndex;
     if (rowIndex === undefined) {
       showError('Tidak dapat mengidentifikasi baris data.');
@@ -183,9 +185,9 @@ export default function HistoryPage() {
 
   const handleExport = () => {
     if (filtered.length === 0) return;
-    const headers = ['Timestamp', 'User', 'Shift', 'Tipe', 'Barcode', 'Deskripsi/Kategori', 'Qty', 'Lokasi', 'Catatan', 'Status', 'Potensi Double'];
+    const headers = ['Timestamp', 'User', 'Shift', 'Tipe', 'Barcode', 'Deskripsi/Kategori', 'Batch', 'Qty', 'Lokasi', 'Catatan', 'Status', 'Potensi Double'];
     const rows = filtered.map((e) => {
-      const isGB = e._sheet === 'gudang-besar';
+      const isGB = adalahGudangBesar(e._sheet);
       const gbE = e as StockEntryGB;
       const ktE = e as StockEntryKT;
       return [
@@ -195,6 +197,7 @@ export default function HistoryPage() {
         isGB ? 'Gudang Besar' : ktE.category,
         isGB ? gbE.barcode : ktE.barcode,
         isGB ? gbE.description : (ktE.ocsCode || ktE.category),
+        e.batchDoc ?? '',
         isGB ? gbE.qtyPcsTotal : ktE.qtyPcs,
         e.location,
         e.notes,
@@ -253,7 +256,7 @@ export default function HistoryPage() {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={15} />
               <input
                 type="text"
-                placeholder="Cari barcode, deskripsi, lokasi..."
+                placeholder="Cari barcode, deskripsi, batch, lokasi..."
                 value={search}
                 onChange={(e) => { setSearch(e.target.value); setPage(1); }}
                 className="w-full pl-9 pr-4 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -293,6 +296,7 @@ export default function HistoryPage() {
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tipe</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Barcode</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Deskripsi/Kat.</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Batch</th>
                     <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Lokasi</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
@@ -301,7 +305,7 @@ export default function HistoryPage() {
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
                   {pageData.map((entry, idx) => {
-                    const isGB = entry._sheet === 'gudang-besar';
+                    const isGB = adalahGudangBesar(entry._sheet);
                     const gbE = entry as StockEntryGB;
                     const ktE = entry as StockEntryKT;
                     const rowClass = entry.potentialDouble
@@ -329,6 +333,9 @@ export default function HistoryPage() {
                         </td>
                         <td className="px-4 py-3 text-xs text-gray-700 dark:text-gray-300 max-w-xs truncate">
                           {isGB ? gbE.description : (ktE.ocsCode || ktE.category)}
+                        </td>
+                        <td className="px-4 py-3 font-mono text-xs text-gray-700 dark:text-gray-300">
+                          {entry.batchDoc || '—'}
                         </td>
                         <td className="px-4 py-3 text-right text-xs font-medium text-gray-900 dark:text-white">
                           {isGB ? `${gbE.qtyPcsTotal} PCS` : `${ktE.qtyPcs} PCS`}
@@ -400,13 +407,14 @@ export default function HistoryPage() {
           >
             <div className="space-y-4">
               <div className="p-3 bg-gray-50 dark:bg-gray-700 rounded-lg text-xs">
-                <p><strong>Barcode:</strong> {editEntry._sheet === 'gudang-besar' ? (editEntry as StockEntryGB).barcode : (editEntry as StockEntryKT).barcode}</p>
-                <p><strong>Tipe:</strong> {editEntry._sheet === 'gudang-besar' ? 'Gudang Besar' : (editEntry as StockEntryKT).category}</p>
+                <p><strong>Barcode:</strong> {adalahGudangBesar(editEntry._sheet) ? (editEntry as StockEntryGB).barcode : (editEntry as StockEntryKT).barcode}</p>
+                <p><strong>Tipe:</strong> {adalahGudangBesar(editEntry._sheet) ? 'Gudang Besar' : (editEntry as StockEntryKT).category}</p>
+                <p><strong>Batch:</strong> {editEntry.batchDoc || '—'}</p>
                 <p><strong>Timestamp:</strong> {formatTs(editEntry.timestamp)}</p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                  {editEntry._sheet === 'gudang-besar' ? 'Qty Karton' : 'Qty PCS'}
+                  {adalahGudangBesar(editEntry._sheet) ? 'Qty Karton' : 'Qty PCS'}
                 </label>
                 <input
                   type="number"
@@ -415,7 +423,7 @@ export default function HistoryPage() {
                   onChange={(e) => setEditQty(Math.max(1, parseInt(e.target.value) || 1))}
                   className="w-full px-4 py-2.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
-                {editEntry._sheet === 'gudang-besar' && (
+                {adalahGudangBesar(editEntry._sheet) && (
                   <p className="text-xs text-gray-500 mt-1">
                     Total PCS: {Math.round(editQty * (editEntry as StockEntryGB).qtyPerBox)}
                   </p>

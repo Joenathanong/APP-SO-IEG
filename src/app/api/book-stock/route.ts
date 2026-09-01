@@ -1,11 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
-import { normalizeCode } from '@/lib/normalize';
+import { prisma, pesanPrisma } from '@/lib/prisma';
 import { getActiveSession } from '@/lib/session';
+import { simpanSnapshot, BarisSumber } from '@/lib/book-stock';
 
 export const dynamic = 'force-dynamic';
 
-/** GET /api/book-stock?sessionId — saldo buku yang sudah ter-import. */
+/**
+ * GET /api/book-stock?sessionId — saldo buku yang BERLAKU untuk sesi tersebut.
+ *
+ * Sumbernya kini snapshot yang ditunjuk sesi, bukan baris milik sesi. Sesi tanpa
+ * snapshot mengembalikan daftar kosong dengan penjelasannya — bukan error.
+ */
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
@@ -13,49 +18,62 @@ export async function GET(req: NextRequest) {
     const sesi = qs
       ? await prisma.opnameSession.findUnique({ where: { id: parseInt(qs, 10) } })
       : await getActiveSession();
-    if (!sesi) return NextResponse.json({ session: null, items: [] });
+    if (!sesi) return NextResponse.json({ session: null, snapshot: null, items: [] });
 
-    const items = await prisma.bookStock.findMany({
-      where: { sessionId: sesi.id },
-      include: { material: { select: { ocsCode: true, name: true, category: true } } },
-      orderBy: { material: { ocsCode: 'asc' } },
-      take: 5000,
-    });
+    if (!sesi.bookSnapshotId) {
+      return NextResponse.json({
+        session: { id: sesi.id, code: sesi.code, name: sesi.name, status: sesi.status },
+        snapshot: null,
+        items: [],
+        pesan: 'Sesi ini belum menunjuk snapshot saldo buku.',
+      });
+    }
+
+    const [snap, items] = await Promise.all([
+      prisma.bookStockSnapshot.findUnique({ where: { id: sesi.bookSnapshotId } }),
+      prisma.bookStock.findMany({
+        where: { snapshotId: sesi.bookSnapshotId },
+        include: { material: { select: { ocsCode: true, name: true, category: true } } },
+        orderBy: { rawCode: 'asc' },
+        take: 5000,
+      }),
+    ]);
 
     return NextResponse.json({
       session: { id: sesi.id, code: sesi.code, name: sesi.name, status: sesi.status },
+      snapshot: snap && {
+        id: snap.id, name: snap.name, source: snap.source, fetchedAt: snap.fetchedAt,
+        rowCount: snap.rowCount, matchedCount: snap.matchedCount, unmatchedCount: snap.unmatchedCount,
+      },
       items: items.map((b) => ({
         materialId: b.materialId,
-        ocsCode: b.material.ocsCode,
-        name: b.material.name,
-        category: b.material.category,
+        ocsCode: b.material?.ocsCode ?? b.rawCode,
+        name: b.material?.name ?? b.rawName ?? '',
+        category: b.material?.category ?? null,
         qtyBook: Number(b.qtyBook),
+        qtyKecil: b.qtyKecil === null ? null : Number(b.qtyKecil),
+        qtyBesar: b.qtyBesar === null ? null : Number(b.qtyBesar),
         rawCode: b.rawCode,
+        dikenal: b.materialId !== null,
       })),
     });
   } catch (e: any) {
     console.error('[book-stock GET]', e);
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    return NextResponse.json({ error: pesanPrisma(e) }, { status: 500 });
   }
 }
 
-type BarisImport = { kode: string; qty: number };
-
 /**
- * POST /api/book-stock  { sessionId?, rows: [{kode, qty}], replace?: boolean }
+ * POST /api/book-stock  { sessionId?, nama?, rows: [{kode, qty}], pakai?: boolean }
  *
- * Saldo buku = kolom "Qty On Hand" dari export OCS. Audit membuktikan nilai itu
- * identik dengan kolom "Jumlah OCS" yang selama ini dipakai (361 cocok, 0 beda).
- *
- * Kode dicocokkan ke material lewat kode OCS, lalu kode SAP (IEG dan EJI), lalu
- * barcode — sehingga file export dari sumber mana pun tetap terpetakan. Baris
- * yang tidak menemukan material TIDAK diam-diam dibuang: jumlahnya dan
- * contohnya dikembalikan supaya bisa dibereskan.
+ * Jalur CADANGAN lewat file .xlsx, dipertahankan supaya opname tetap jalan saat
+ * OCS tidak bisa dihubungi. Hasilnya kini berupa snapshot bernama, sama seperti
+ * tarikan OCS — jadi bisa dipakai ulang dan tidak menimpa apa pun.
  */
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const rows = (body.rows ?? []) as BarisImport[];
+    const rows = (body.rows ?? []) as BarisSumber[];
     if (!Array.isArray(rows) || rows.length === 0) {
       return NextResponse.json({ error: 'Tidak ada baris untuk di-import' }, { status: 400 });
     }
@@ -63,76 +81,39 @@ export async function POST(req: NextRequest) {
     const sesi = body.sessionId
       ? await prisma.opnameSession.findUnique({ where: { id: parseInt(String(body.sessionId), 10) } })
       : await getActiveSession();
-    if (!sesi) {
-      return NextResponse.json(
-        { error: 'Belum ada sesi opname yang dibuka. Buka sesi dulu sebelum import saldo buku.' },
-        { status: 409 }
-      );
-    }
-    if (sesi.status === 'CLOSED') {
-      return NextResponse.json({ error: `Sesi ${sesi.code} sudah ditutup.` }, { status: 409 });
+
+    const dasar = String(body.nama ?? '').trim() || `upload-${sesi?.name ?? new Date().toISOString().slice(0, 16)}`;
+    let nama = dasar.slice(0, 160);
+    for (let i = 2; await prisma.bookStockSnapshot.findUnique({ where: { name: nama } }); i++) {
+      nama = `${dasar} (${i})`.slice(0, 160);
     }
 
-    const materials = await prisma.material.findMany({
-      select: {
-        id: true, normOcsCode: true, normSapIeg: true, normSapEji: true,
-        normBarcodeProduct: true, normBarcodeBpom: true,
-      },
+    const hasil = await simpanSnapshot({
+      nama,
+      sumber: 'UPLOAD',
+      baris: rows,
+      originSessionId: sesi?.id ?? null,
+      createdBy: body.createdBy ?? null,
+      notes: 'Diunggah dari file.',
     });
-    const peta = new Map<string, number>();
-    // Urutan pengisian menentukan prioritas: kode OCS paling dipercaya.
-    for (const m of materials) if (m.normBarcodeBpom) peta.set('b:' + m.normBarcodeBpom, m.id);
-    for (const m of materials) if (m.normBarcodeProduct) peta.set('b:' + m.normBarcodeProduct, m.id);
-    for (const m of materials) if (m.normSapEji) peta.set('s:' + m.normSapEji, m.id);
-    for (const m of materials) if (m.normSapIeg) peta.set('s:' + m.normSapIeg, m.id);
-    for (const m of materials) peta.set('o:' + m.normOcsCode, m.id);
 
-    const cocok: { materialId: number; qty: number; raw: string }[] = [];
-    const takCocok: string[] = [];
-    const sudah = new Set<number>();
-
-    for (const r of rows) {
-      const raw = String(r.kode ?? '').trim();
-      const n = normalizeCode(raw);
-      if (!n) continue;
-      const id = peta.get('o:' + n) ?? peta.get('s:' + n) ?? peta.get('b:' + n);
-      if (!id) { takCocok.push(raw); continue; }
-      if (sudah.has(id)) continue;      // baris kembar dalam file yang sama
-      sudah.add(id);
-      cocok.push({ materialId: id, qty: Number(r.qty) || 0, raw });
-    }
-
-    if (body.replace) {
-      await prisma.bookStock.deleteMany({ where: { sessionId: sesi.id } });
-    }
-
-    // Ditulis bertahap agar file besar tidak menabrak batas ukuran transaksi TiDB.
-    const UKURAN = 200;
-    let ditulis = 0;
-    for (let i = 0; i < cocok.length; i += UKURAN) {
-      const bagian = cocok.slice(i, i + UKURAN);
-      await prisma.$transaction(
-        bagian.map((c) =>
-          prisma.bookStock.upsert({
-            where: { sessionId_materialId: { sessionId: sesi.id, materialId: c.materialId } },
-            create: { sessionId: sesi.id, materialId: c.materialId, qtyBook: c.qty, rawCode: c.raw.slice(0, 96) },
-            update: { qtyBook: c.qty, rawCode: c.raw.slice(0, 96) },
-          })
-        )
-      );
-      ditulis += bagian.length;
+    // Sengaja TIDAK otomatis dipakai kecuali diminta: mengganti pembanding sesi
+    // yang sedang berjalan harus selalu keputusan sadar.
+    if (body.pakai && sesi) {
+      await prisma.opnameSession.update({ where: { id: sesi.id }, data: { bookSnapshotId: hasil.id } });
     }
 
     return NextResponse.json({
       success: true,
-      session: { id: sesi.id, code: sesi.code },
+      session: sesi ? { id: sesi.id, code: sesi.code } : null,
+      snapshot: hasil,
+      dipakai: Boolean(body.pakai && sesi),
       dibaca: rows.length,
-      tersimpan: ditulis,
-      tidakDikenal: takCocok.length,
-      contohTidakDikenal: takCocok.slice(0, 20),
+      tersimpan: hasil.rowCount,
+      tidakDikenal: hasil.unmatchedCount,
     });
   } catch (e: any) {
     console.error('[book-stock POST]', e);
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    return NextResponse.json({ error: pesanPrisma(e) }, { status: 500 });
   }
 }

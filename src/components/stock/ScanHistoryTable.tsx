@@ -67,6 +67,7 @@ export function ScanHistoryTable({ entries, type, onEdit }: ScanHistoryTableProp
               ) : (
                 <>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Kategori</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Batch</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Qty PCS</th>
                 </>
               )}
@@ -113,6 +114,9 @@ export function ScanHistoryTable({ entries, type, onEdit }: ScanHistoryTableProp
                     <>
                       <td className="px-4 py-3 text-xs text-gray-700 dark:text-gray-300">
                         {ktEntry.category}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs text-gray-700 dark:text-gray-300">
+                        {ktEntry.batchDoc || '—'}
                       </td>
                       <td className="px-4 py-3 text-right text-xs font-medium text-gray-900 dark:text-white">
                         {ktEntry.qtyPcs}

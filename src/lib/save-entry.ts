@@ -37,7 +37,7 @@ function toPayload(type: EntryType, e: StockEntryGB | StockEntryKT) {
       barcode: g.barcode || null,
       rawMaterialText: g.materialId || null,
       rawBarcode: g.barcode || '',
-      batchDoc: g.batchDoc || null,
+      batchDoc: g.batchDoc?.trim() || null,
       qtyCarton: g.qtyCarton ?? null,
       qtyPerBox: g.qtyPerBox ?? null,
       qtyPcs: g.qtyPcsTotal,
@@ -52,7 +52,10 @@ function toPayload(type: EntryType, e: StockEntryGB | StockEntryKT) {
     barcode: k.barcode || null,
     rawMaterialText: k.sapCode && k.sapCode !== 'null' ? k.sapCode : k.barcode || null,
     rawBarcode: k.barcode || '',
-    batchDoc: null,
+    // Sebelumnya dipaku null. Gudang Kecil & Transit kini punya isian batch
+    // manual, karena barcode mereka — tidak seperti Gudang Besar — tidak
+    // membawa field batch sama sekali.
+    batchDoc: k.batchDoc?.trim() || null,
     qtyCarton: null,
     qtyPerBox: null,
     qtyPcs: k.qtyPcs,

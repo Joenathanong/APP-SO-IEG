@@ -25,6 +25,20 @@ type Payload = {
   scannedAt?: string;
 };
 
+/**
+ * Potong teks ke panjang kolomnya.
+ *
+ * Kolom di TiDB punya batas VarChar yang tegas; nilai yang melebihi batas
+ * membuat Prisma melempar P2000 dan SELURUH entry gagal tersimpan. Entry itu
+ * lalu masuk antrean dan dicoba ulang selamanya — selalu gagal dengan sebab
+ * yang sama. Jadi catatan yang terpotong jauh lebih baik daripada scan yang
+ * hilang: potong di sini, jangan biarkan penyimpanan gagal.
+ */
+function potong(v: string | null | undefined, maks: number): string | null {
+  const t = (v ?? '').trim();
+  return t ? t.slice(0, maks) : null;
+}
+
 /** Cari material dari materialId, kode SAP, lalu barcode — berhenti di yang pertama ketemu. */
 async function resolveMaterial(p: Payload) {
   if (p.materialId) {
@@ -95,9 +109,9 @@ export async function POST(req: NextRequest) {
       sessionId: sesi.id,
       warehouseType: p.warehouseType,
       materialId: material?.id ?? null,
-      rawMaterialText: p.rawMaterialText ?? p.sapCode ?? p.barcode ?? null,
+      rawMaterialText: potong(p.rawMaterialText ?? p.sapCode ?? p.barcode, 255),
       rawBarcode: (p.rawBarcode ?? '').slice(0, 255),
-      batchDoc: p.batchDoc ?? null,
+      batchDoc: potong(p.batchDoc, 32),
       qtyCarton: p.qtyCarton ?? null,
       qtyPerBox: p.qtyPerBox ?? null,
       qtyPcs: p.qtyPcs,
@@ -106,7 +120,7 @@ export async function POST(req: NextRequest) {
       binKnown: Boolean(bin),
       userName: p.userName,
       shift: p.shift,
-      notes: p.notes ?? null,
+      notes: potong(p.notes, 255),
       scannedAt: p.scannedAt ? new Date(p.scannedAt) : new Date(),
     };
 

@@ -66,3 +66,21 @@ export function formatCountdown(ms: number): string {
   const seconds = totalSeconds % 60;
   return `${String(minutes).padStart(2,'0')}:${String(seconds).padStart(2,'0')}`;
 }
+
+/**
+ * Apakah baris ini berasal dari Gudang Besar?
+ *
+ * DIBUAT karena halaman History dan Dashboard membandingkan `_sheet` dengan
+ * 'gudang-besar' / 'gudang-kecil-transit', sementara /api/history mengirim
+ * 'Gudang Besar' / 'Gudang Kecil' / 'Gudang Transit'. Kedua himpunan itu tidak
+ * beririsan sama sekali, jadi SETIAP perbandingan selalu bernilai false: baris
+ * Gudang Besar tampil sebagai Transit dengan Qty "undefined PCS", dan seluruh
+ * angka di Dashboard nol.
+ *
+ * Pencocokan sengaja longgar (cukup mengandung "besar") supaya ejaan lama
+ * maupun baru sama-sama dikenali, dan bug ini tidak terulang hanya karena satu
+ * sisi berubah ejaan lagi.
+ */
+export function adalahGudangBesar(sheet?: string | null): boolean {
+  return (sheet ?? '').toLowerCase().includes('besar');
+}

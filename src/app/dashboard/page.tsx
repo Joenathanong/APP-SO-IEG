@@ -12,6 +12,8 @@ import { Badge } from '@/components/ui/Badge';
 import { format, parseISO, isValid } from 'date-fns';
 import { id as idLocale } from 'date-fns/locale';
 
+import { adalahGudangBesar } from '@/lib/utils';
+
 type CombinedEntry = ((StockEntryGB | StockEntryKT) & { _sheet: string });
 
 const PIE_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
@@ -67,8 +69,11 @@ export default function DashboardPage() {
   };
 
   // Stats
-  const gbEntries = data.filter((e) => e._sheet === 'gudang-besar') as (StockEntryGB & { _sheet: string })[];
-  const ktEntries = data.filter((e) => e._sheet === 'gudang-kecil-transit') as (StockEntryKT & { _sheet: string })[];
+  // Dulu dibandingkan dengan 'gudang-besar' / 'gudang-kecil-transit', ejaan yang
+  // TIDAK PERNAH dikirim /api/history — sehingga kedua daftar ini selalu kosong
+  // dan seluruh kartu statistik serta diagram lingkaran menampilkan nol.
+  const gbEntries = data.filter((e) => adalahGudangBesar(e._sheet)) as (StockEntryGB & { _sheet: string })[];
+  const ktEntries = data.filter((e) => !adalahGudangBesar(e._sheet)) as (StockEntryKT & { _sheet: string })[];
   const kecilEntries = ktEntries.filter((e) => e.category === 'Gudang Kecil');
   const transitEntries = ktEntries.filter((e) => e.category === 'Gudang Transit');
   const doubleCount = data.filter((e) => e.potentialDouble).length;
@@ -308,7 +313,7 @@ export default function DashboardPage() {
                 </thead>
                 <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
                   {recentEntries.map((entry, idx) => {
-                    const isGB = entry._sheet === 'gudang-besar';
+                    const isGB = adalahGudangBesar(entry._sheet);
                     const gbE = entry as StockEntryGB & { _sheet: string };
                     const ktE = entry as StockEntryKT & { _sheet: string };
                     return (

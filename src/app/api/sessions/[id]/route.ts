@@ -16,9 +16,24 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   if (Number.isNaN(id)) return NextResponse.json({ error: 'id tidak valid' }, { status: 400 });
 
   try {
-    const { action } = (await req.json()) as { action: 'open' | 'close' | 'reopen' };
+    const body = (await req.json()) as { action: 'open' | 'close' | 'reopen' | 'set-snapshot'; snapshotId?: number | null };
+    const { action } = body;
     const sesi = await prisma.opnameSession.findUnique({ where: { id } });
     if (!sesi) return NextResponse.json({ error: 'Sesi tidak ditemukan' }, { status: 404 });
+
+    // Mengganti snapshot pembanding SENGAJA diizinkan walau sesi sedang OPEN.
+    // Yang berubah hanya penunjuk; tidak satu pun baris hasil scan tersentuh,
+    // jadi angka selisih dihitung ulang terhadap saldo baru dan hasil hitung
+    // operator tetap utuh.
+    if (action === 'set-snapshot') {
+      const snapshotId = body.snapshotId == null ? null : Number(body.snapshotId);
+      if (snapshotId !== null) {
+        const ada = await prisma.bookStockSnapshot.findUnique({ where: { id: snapshotId }, select: { id: true } });
+        if (!ada) return NextResponse.json({ error: 'Snapshot tidak ditemukan.' }, { status: 404 });
+      }
+      const updated = await prisma.opnameSession.update({ where: { id }, data: { bookSnapshotId: snapshotId } });
+      return NextResponse.json(updated);
+    }
 
     if (action === 'open' || action === 'reopen') {
       // Sesi yang sudah ditutup BOLEH dibuka kembali — menutup karena salah
@@ -46,7 +61,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       return NextResponse.json(updated);
     }
 
-    return NextResponse.json({ error: 'action harus "open", "reopen", atau "close"' }, { status: 400 });
+    return NextResponse.json({ error: 'action harus "open", "reopen", "close", atau "set-snapshot"' }, { status: 400 });
   } catch (e: any) {
     if (e?.code === 'P2002') {
       const aktif = await prisma.opnameSession.findFirst({
@@ -93,31 +108,32 @@ export async function DELETE(req: NextRequest, { params }: { params: { id: strin
       );
     }
 
-    const [jumlahScan, jumlahBuku, jumlahBin] = await Promise.all([
+    const [jumlahScan, jumlahBin] = await Promise.all([
       prisma.soEntry.count({ where: { sessionId: id } }),
-      prisma.bookStock.count({ where: { sessionId: id } }),
       prisma.binCount.count({ where: { sessionId: id } }),
     ]);
 
     // relationMode = "prisma" berarti TiDB tidak menegakkan foreign key, jadi
     // anak-anaknya harus dihapus sendiri — kalau tidak, barisnya jadi yatim dan
     // ikut terhitung di laporan sesi lain.
+    // Snapshot saldo buku TIDAK ikut terhapus. Ia berdiri sendiri dan mungkin
+    // dipakai sesi lain — juga tetap berguna sebagai arsip angka buku periode
+    // ini walau sesinya dibuang.
     await prisma.$transaction([
       prisma.soEntry.deleteMany({ where: { sessionId: id } }),
-      prisma.bookStock.deleteMany({ where: { sessionId: id } }),
       prisma.binCount.deleteMany({ where: { sessionId: id } }),
       prisma.opnameSession.delete({ where: { id } }),
     ]);
 
     console.warn(
       `[sessions DELETE] Sesi ${sesi.code} dihapus oleh ${body.requestedBy ?? '(tidak diketahui)'} ` +
-      `— ${jumlahScan} scan, ${jumlahBuku} saldo buku, ${jumlahBin} status bin ikut terhapus.`
+      `— ${jumlahScan} scan dan ${jumlahBin} status bin ikut terhapus; snapshot saldo buku tetap disimpan.`
     );
 
     return NextResponse.json({
       success: true,
       code: sesi.code,
-      terhapus: { scan: jumlahScan, saldoBuku: jumlahBuku, statusBin: jumlahBin },
+      terhapus: { scan: jumlahScan, statusBin: jumlahBin },
     });
   } catch (e: any) {
     console.error('[sessions DELETE]', e);
