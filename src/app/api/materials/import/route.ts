@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
+import { tautkanUlangDiamDiam } from '@/lib/match-material';
 import { normalizeCode, classifySapCode, cleanValue } from '@/lib/normalize';
 
 export const dynamic = 'force-dynamic';
@@ -97,10 +98,14 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Import massal adalah saat master paling banyak berubah, jadi justru di
+    // sinilah penautan ulang paling berguna.
+    const taut = await tautkanUlangDiamDiam();
+
     return NextResponse.json({
       success: true,
       dibaca: rows.length, dibuat, diperbarui, dilewati, dinonaktifkan,
-      contohDilewati,
+      contohDilewati, taut,
     });
   } catch (e: any) {
     console.error('[materials/import POST]', e);

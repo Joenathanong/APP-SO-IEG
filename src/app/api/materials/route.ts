@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
+import { tautkanUlangDiamDiam } from '@/lib/match-material';
 import { normalizeCode } from '@/lib/normalize';
 
 export const dynamic = 'force-dynamic';
@@ -91,7 +92,12 @@ export async function POST(req: NextRequest) {
     if (!b.ocsCode?.trim()) return NextResponse.json({ error: 'Kode OCS wajib diisi' }, { status: 400 });
 
     const m = await prisma.material.create({ data: { ...turunkan(b), source: 'manual' } });
-    return NextResponse.json(bentuk(m), { status: 201 });
+
+    // Master bertambah -> scan lama yang belum dikenal dicoba ditautkan lagi.
+    // Tanpa ini, barang yang baru didaftarkan tetap tampil "belum dikenal" di
+    // Data SO padahal masternya sudah ada.
+    const taut = await tautkanUlangDiamDiam();
+    return NextResponse.json({ ...bentuk(m), taut }, { status: 201 });
   } catch (e: any) {
     if (e?.code === 'P2002') {
       return NextResponse.json({ error: 'Kode OCS ini sudah ada.' }, { status: 409 });
@@ -114,7 +120,12 @@ export async function PATCH(req: NextRequest) {
       where: { id },
       data: turunkan({ ...lama, ...b, ocsCode: b.ocsCode ?? lama.ocsCode }),
     });
-    return NextResponse.json(bentuk(m));
+
+    // Menyunting barcode atau kode SAP bisa membuat scan yang tadinya tidak
+    // dikenal jadi cocok. Kolom SKU OCS sendiri tidak perlu disegarkan: ia
+    // dibaca lewat relasi, jadi perubahan nama/kode langsung ikut.
+    const taut = await tautkanUlangDiamDiam();
+    return NextResponse.json({ ...bentuk(m), taut });
   } catch (e: any) {
     if (e?.code === 'P2002') {
       return NextResponse.json({ error: 'Kode OCS ini sudah dipakai material lain.' }, { status: 409 });

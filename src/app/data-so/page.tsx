@@ -30,6 +30,9 @@ interface DataSORow {
   keterangan: string;
   notes: string;
   timestamp: string;
+  /// false = scan ini belum punya pasangan di master material, jadi kolom
+  /// SKU OCS-nya belum bisa terisi.
+  dikenal: boolean;
 }
 
 type SortField = keyof Pick<DataSORow, 'tanggal' | 'user' | 'shift' | 'skuSAP' | 'skuOCS' | 'batch' | 'lokasi' | 'quantity' | 'keterangan'>;
@@ -180,7 +183,8 @@ function EditModal({ row, onClose, onSaved }: EditModalProps) {
 
 export default function DataSOPage() {
   const { user } = useAuth();
-  const { showError } = useToast();
+  const [mencocokkan, setMencocokkan] = useState(false);
+  const { showError, showSuccess } = useToast();
 
   const isAdmin = user?.role === 'administrator';
 
@@ -257,6 +261,7 @@ export default function DataSOPage() {
             : 'Gudang Kecil',
           notes: e.notes ?? '',
           timestamp: e.scannedAt,
+          dikenal: e.skuOCS != null,
         }));
 
       setRows(semua);
@@ -322,6 +327,51 @@ export default function DataSOPage() {
   const handleEditSaved = (updated: DataSORow) => {
     setRows((prev) => prev.map((r) => r._id === updated._id ? updated : r));
   };
+
+  /**
+   * Cocokkan ulang scan yang belum tertaut ke master material.
+   *
+   * Kolom SKU OCS baris yang SUDAH tertaut memang tidak perlu disegarkan — ia
+   * dibaca lewat relasi ke master, jadi perubahan nama atau kode di Master
+   * Material langsung ikut begitu halaman ini dimuat ulang. Yang tidak ikut
+   * sendiri hanyalah baris yang saat discan belum punya pasangan sama sekali;
+   * tautannya diputuskan sekali, dan itulah yang tombol ini perbaiki.
+   *
+   * Biasanya tidak perlu ditekan: penautan sudah berjalan otomatis setiap kali
+   * master ditambah, disunting, atau di-import. Tombol ini untuk kasus master
+   * diubah lewat jalur lain, atau sekadar memastikan.
+   */
+  const cocokkanUlang = async () => {
+    setMencocokkan(true);
+    try {
+      const res = await fetch('/api/entries/rematch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+      if (j.tertaut > 0) {
+        showSuccess(`${j.tertaut} baris tertaut ke master`, `Sisa ${j.masihBelum} masih belum dikenal.`);
+        fetchData();
+      } else {
+        showError(
+          'Tidak ada yang bisa ditautkan',
+          `${j.diperiksa} baris diperiksa terhadap ${j.jumlahMaterial} material — kodenya memang belum ada di master, ` +
+            'atau barcode-nya dipakai lebih dari satu produk aktif sehingga sengaja tidak dipilih otomatis.'
+        );
+      }
+    } catch (e: any) {
+      showError('Gagal mencocokkan ulang', e.message);
+    } finally {
+      setMencocokkan(false);
+    }
+  };
+
+  // Dihitung dari seluruh baris yang dimuat, BUKAN dari hasil filter —
+  // menyembunyikan angkanya saat filter aktif akan membuat masalah ini
+  // tampak hilang padahal tidak.
+  const belumDikenal = useMemo(() => rows.filter((r) => !r.dikenal).length, [rows]);
 
   // ── Export XLS ──
   const handleExport = async () => {
@@ -403,6 +453,27 @@ export default function DataSOPage() {
               Export XLS
             </Button>
           </div>
+
+        {/* Baris yang belum tertaut ke master material */}
+        {belumDikenal > 0 && (
+          <div className="flex flex-wrap items-start gap-3 p-3.5 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-xl">
+            <AlertTriangle size={18} className="text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-56">
+              <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+                {belumDikenal} baris belum tertaut ke master material
+              </p>
+              <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
+                Kolom SKU OCS-nya menampilkan kode mentah karena barang itu belum ada di master saat discan.
+                Penautan berjalan otomatis setiap master ditambah atau di-import; tombol ini untuk memaksanya sekarang.
+              </p>
+            </div>
+            {user?.role === 'administrator' && (
+              <Button onClick={cocokkanUlang} size="sm" variant="outline" loading={mencocokkan}>
+                <RefreshCw size={14} /> Cocokkan ulang
+              </Button>
+            )}
+          </div>
+        )}
         </div>
 
         {/* Filter bar */}

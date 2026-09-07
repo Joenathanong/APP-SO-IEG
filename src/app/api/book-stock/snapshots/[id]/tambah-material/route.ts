@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma, pesanPrisma } from '@/lib/prisma';
 import { normalizeCode, classifySapCode } from '@/lib/normalize';
+import { tautkanUlangDiamDiam } from '@/lib/match-material';
 
 export const dynamic = 'force-dynamic';
 
@@ -79,7 +80,10 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       where: { id }, data: { matchedCount: cocok, unmatchedCount: takCocok },
     });
 
-    return NextResponse.json({ success: true, dibuat, disambungkan, sisaBelumCocok: takCocok });
+    // Material baru berarti scan lama mungkin sekarang punya pasangan.
+    const taut = dibuat > 0 ? await tautkanUlangDiamDiam() : null;
+
+    return NextResponse.json({ success: true, dibuat, disambungkan, sisaBelumCocok: takCocok, taut });
   } catch (e: any) {
     console.error('[tambah-material]', e);
     return NextResponse.json({ error: pesanPrisma(e) }, { status: 500 });
