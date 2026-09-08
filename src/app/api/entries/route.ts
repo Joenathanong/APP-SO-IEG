@@ -173,7 +173,15 @@ export async function POST(req: NextRequest) {
   }
 }
 
-/** GET /api/entries?sessionId=&warehouseType=&from=&to=&q= — untuk halaman Data SO. */
+/**
+ * GET /api/entries?sessionId=&warehouseType=&from=&to=&q= — untuk halaman Data SO.
+ *
+ * `sessionId` menerima nomor sesi, atau `all` untuk semua sesi sekaligus.
+ * Bila tidak diisi: sesi yang sedang OPEN, dan kalau tidak ada yang terbuka,
+ * sesi TERBARU. Dulu kasus terakhir mengembalikan array kosong — sehingga
+ * sehabis sesi ditutup, halaman Data SO tampak kosong melompong seolah seluruh
+ * hasil opname hilang, padahal datanya utuh.
+ */
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
@@ -183,12 +191,26 @@ export async function GET(req: NextRequest) {
     const to = searchParams.get('to');
     const q = searchParams.get('q');
 
-    const sesi = sessionId ? parseInt(sessionId, 10) : (await getActiveSession())?.id;
-    if (!sesi) return NextResponse.json([]);
+    const semuaSesi = sessionId === 'all';
+    let sesi: number | undefined;
+    if (!semuaSesi) {
+      if (sessionId) {
+        const n = parseInt(sessionId, 10);
+        if (!Number.isFinite(n)) {
+          return NextResponse.json({ error: 'sessionId harus angka atau "all"' }, { status: 400 });
+        }
+        sesi = n;
+      } else {
+        sesi =
+          (await getActiveSession())?.id ??
+          (await prisma.opnameSession.findFirst({ orderBy: { createdAt: 'desc' }, select: { id: true } }))?.id;
+      }
+      if (!sesi) return NextResponse.json([]);
+    }
 
     const entries = await prisma.soEntry.findMany({
       where: {
-        sessionId: sesi,
+        ...(semuaSesi ? {} : { sessionId: sesi }),
         ...(warehouseType ? { warehouseType: warehouseType as any } : {}),
         ...(from || to
           ? { scannedAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } }
@@ -205,7 +227,10 @@ export async function GET(req: NextRequest) {
             }
           : {}),
       },
-      include: { material: { select: { ocsCode: true, name: true, sapCodeIeg: true, sapCodeEji: true } } },
+      include: {
+        material: { select: { ocsCode: true, name: true, sapCodeIeg: true, sapCodeEji: true } },
+        session: { select: { code: true, name: true } },
+      },
       orderBy: { scannedAt: 'desc' },
       take: 5000,
     });
@@ -215,6 +240,9 @@ export async function GET(req: NextRequest) {
         id: e.id,
         clientEntryId: e.clientEntryId,
         warehouseType: e.warehouseType,
+        sessionId: e.sessionId,
+        kodeSO: e.session?.code ?? '',
+        namaSesi: e.session?.name ?? '',
         skuOCS: e.material?.ocsCode ?? null,
         namaProduk: e.material?.name ?? null,
         skuSAP: e.material?.sapCodeIeg ?? e.material?.sapCodeEji ?? e.rawMaterialText,

@@ -18,6 +18,8 @@ interface DataSORow {
   _id: string;
   source: 'gudang-besar' | 'gudang-kecil' | 'gudang-transit';
   rowIndex: number;
+  /// Kode sesi opname tempat scan ini tercatat, mis. SO-2026-09-001.
+  kodeSO: string;
   tanggal: string;   // full ISO timestamp from col A
   user: string;
   shift: string;
@@ -35,7 +37,7 @@ interface DataSORow {
   dikenal: boolean;
 }
 
-type SortField = keyof Pick<DataSORow, 'tanggal' | 'user' | 'shift' | 'skuSAP' | 'skuOCS' | 'batch' | 'lokasi' | 'quantity' | 'keterangan'>;
+type SortField = keyof Pick<DataSORow, 'kodeSO' | 'tanggal' | 'user' | 'shift' | 'skuSAP' | 'skuOCS' | 'batch' | 'lokasi' | 'quantity' | 'keterangan'>;
 type SortDir = 'asc' | 'desc';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -128,6 +130,7 @@ function EditModal({ row, onClose, onSaved }: EditModalProps) {
       <div className="space-y-4">
         {/* Info row */}
         <div className="grid grid-cols-2 gap-3 p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg text-xs">
+          <div><span className="text-gray-500">Kode SO:</span> <span className="font-medium">{row.kodeSO || '—'}</span></div>
           <div><span className="text-gray-500">SKU SAP:</span> <span className="font-medium">{row.skuSAP || '—'}</span></div>
           <div><span className="text-gray-500">SKU OCS:</span> <span className="font-medium">{row.skuOCS || '—'}</span></div>
           <div><span className="text-gray-500">Batch:</span> <span className="font-medium">{row.batch || '—'}</span></div>
@@ -194,6 +197,10 @@ export default function DataSOPage() {
   const [startTime, setStartTime] = useState('00:00');
   const [endTime, setEndTime] = useState('23:59');
   const [warehouse, setWarehouse] = useState<WarehouseFilter>('all');
+  // '' = ikuti bawaan server (sesi terbuka, atau sesi terbaru bila tidak ada
+  // yang terbuka). 'all' = semua sesi. Selain itu: id sesi sebagai teks.
+  const [sesiFilter, setSesiFilter] = useState<string>('');
+  const [daftarSesi, setDaftarSesi] = useState<{ id: number; code: string; name: string; status: string }[]>([]);
   const [search, setSearch] = useState('');
 
   // Sort
@@ -226,6 +233,7 @@ export default function DataSOPage() {
         to: `${endDate}T23:59:59`,
       });
       if (warehouse === 'besar') params.set('warehouseType', 'BESAR');
+      if (sesiFilter) params.set('sessionId', sesiFilter);
 
       const res = await fetch(`/api/entries?${params}`, { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -243,6 +251,7 @@ export default function DataSOPage() {
             : e.warehouseType === 'TRANSIT' ? ('gudang-transit' as const)
             : ('gudang-kecil' as const),
           rowIndex: e.id,
+          kodeSO: e.kodeSO ?? '',
           tanggal: e.scannedAt,
           user: e.userName,
           shift: e.shift,
@@ -270,9 +279,21 @@ export default function DataSOPage() {
     } finally {
       setLoading(false);
     }
-  }, [startDate, endDate, warehouse, timeValid]);
+  }, [startDate, endDate, warehouse, sesiFilter, timeValid]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Daftar sesi untuk isi dropdown. Kegagalannya sengaja TIDAK memunculkan
+  // toast: tabelnya tetap berguna tanpa filter sesi, dan pesan error yang
+  // tidak bisa ditindaklanjuti hanya melatih orang mengabaikan peringatan.
+  useEffect(() => {
+    let batal = false;
+    fetch('/api/sessions', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((j) => { if (!batal && Array.isArray(j)) setDaftarSesi(j); })
+      .catch(() => {});
+    return () => { batal = true; };
+  }, []);
 
   // ── Filter & Sort ──
   const filteredRows = useMemo(() => {
@@ -295,6 +316,7 @@ export default function DataSOPage() {
       const q = search.toLowerCase();
       data = data.filter((r) =>
         r.skuSAP.toLowerCase().includes(q) ||
+        r.kodeSO.toLowerCase().includes(q) ||
         r.skuOCS.toLowerCase().includes(q) ||
         r.batch.toLowerCase().includes(q) ||
         r.lokasi.toLowerCase().includes(q) ||
@@ -381,10 +403,11 @@ export default function DataSOPage() {
     }
     try {
       const XLSX = await import('xlsx');
-      const headers = ['Tanggal & Jam', 'User', 'Shift', 'SKU SAP', 'SKU OCS', 'Batch', 'Lokasi', 'Quantity', 'UOM', 'Keterangan', 'Catatan'];
+      const headers = ['Kode SO', 'Tanggal & Jam', 'User', 'Shift', 'SKU SAP', 'SKU OCS', 'Batch', 'Lokasi', 'Quantity', 'UOM', 'Keterangan', 'Catatan'];
       const wsData = [
         headers,
         ...filteredRows.map((r) => [
+          r.kodeSO,
           formatDateTime(r.tanggal),
           r.user, r.shift, r.skuSAP, r.skuOCS,
           r.batch, r.lokasi, r.quantity, r.uom, r.keterangan, r.notes,
@@ -402,7 +425,11 @@ export default function DataSOPage() {
       XLSX.utils.book_append_sheet(wb, ws, 'Data SO');
 
       const safeTime = (t: string) => t.replace(':', '');
-      const fileName = `Data_SO_${startDate}_${safeTime(startTime)}_sd_${endDate}_${safeTime(endTime)}_${warehouse}.xls`;
+      const labelSesi =
+        sesiFilter === 'all' ? 'semua-sesi'
+        : sesiFilter ? (daftarSesi.find((x) => String(x.id) === sesiFilter)?.code ?? `sesi${sesiFilter}`)
+        : (filteredRows[0]?.kodeSO || 'sesi-aktif');
+      const fileName = `Data_SO_${labelSesi}_${startDate}_${safeTime(startTime)}_sd_${endDate}_${safeTime(endTime)}_${warehouse}.xls`;
       XLSX.writeFile(wb, fileName);
     } catch {
       showError('Gagal export XLS.');
@@ -528,6 +555,26 @@ export default function DataSOPage() {
               </div>
             </div>
 
+            {/* Filter sesi opname */}
+            <div>
+              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Kode SO</label>
+              <select
+                value={sesiFilter}
+                onChange={(e) => setSesiFilter(e.target.value)}
+                className={inputClass}
+              >
+                {/* Nilai kosong = ikut bawaan server: sesi yang terbuka, atau
+                    sesi terbaru bila tidak ada yang terbuka. */}
+                <option value="">Sesi berjalan</option>
+                <option value="all">Semua sesi</option>
+                {daftarSesi.map((x) => (
+                  <option key={x.id} value={String(x.id)}>
+                    {x.code} — {x.name}{x.status === 'OPEN' ? ' (terbuka)' : x.status === 'DRAFT' ? ' (draf)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             {/* Warehouse filter */}
             <div>
               <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Gudang</label>
@@ -551,7 +598,7 @@ export default function DataSOPage() {
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="SKU, lokasi, user, batch..."
+                  placeholder="Kode SO, SKU, lokasi, user, batch..."
                   className="w-full pl-8 pr-8 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 {search && (
@@ -602,6 +649,7 @@ export default function DataSOPage() {
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 dark:bg-gray-700/50 border-b border-gray-200 dark:border-gray-700">
                   <tr>
+                    <Th label="Kode SO"       field="kodeSO" />
                     <Th label="Tanggal & Jam" field="tanggal" />
                     <Th label="User"          field="user" />
                     <Th label="Shift"         field="shift" />
@@ -620,6 +668,9 @@ export default function DataSOPage() {
                 <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
                   {filteredRows.map((row) => (
                     <tr key={row._id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
+                      <td className="px-3 py-2.5 font-mono text-xs text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                        {row.kodeSO || '—'}
+                      </td>
                       <td className="px-3 py-2.5 text-gray-700 dark:text-gray-300 whitespace-nowrap text-xs">
                         {formatDateTime(row.tanggal)}
                       </td>
